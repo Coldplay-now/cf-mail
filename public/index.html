@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>cf-mail</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- login -->
+    <div id="login" class="login hidden">
+      <div class="login-card">
+        <h1>cf-mail</h1>
+        <p>Paste your <code>AUTH_TOKEN</code> to sign in.</p>
+        <input id="login-token" type="password" placeholder="token" autocomplete="off">
+        <button id="login-btn">Sign in</button>
+        <p id="login-error" class="error"></p>
+      </div>
+    </div>
+
+    <!-- main -->
+    <div id="main" class="layout hidden">
+      <aside class="sidebar">
+        <div class="brand">cf-mail</div>
+        <button id="compose-btn" class="primary">Compose</button>
+        <nav id="folders">
+          <a data-folder="inbox" class="active">Inbox <span id="count-unread" class="badge"></span></a>
+          <a data-folder="sent">Sent</a>
+          <a data-folder="archived">Archived</a>
+          <a data-folder="spam">Spam</a>
+        </nav>
+        <nav>
+          <a id="nav-settings">Settings</a>
+          <a id="nav-logout">Sign out</a>
+        </nav>
+      </aside>
+
+      <main class="content">
+        <!-- list -->
+        <section id="view-list">
+          <div class="toolbar">
+            <input id="search" type="search" placeholder="Search subject / address / body">
+            <button id="refresh">Refresh</button>
+          </div>
+          <ul id="mail-list" class="mail-list"></ul>
+          <div class="pager">
+            <button id="prev">←</button>
+            <span id="page-info"></span>
+            <button id="next">→</button>
+          </div>
+        </section>
+
+        <!-- detail -->
+        <section id="view-detail" class="hidden">
+          <div class="toolbar">
+            <button id="back">← Back</button>
+            <span class="spacer"></span>
+            <button id="d-reply">Reply</button>
+            <button id="d-archive">Archive</button>
+            <button id="d-spam">Spam</button>
+            <button id="d-delete" class="danger">Delete</button>
+          </div>
+          <h2 id="d-subject"></h2>
+          <p id="d-meta" class="meta"></p>
+          <div id="d-attachments" class="attachments"></div>
+          <iframe id="d-frame" sandbox="" class="hidden"></iframe>
+          <pre id="d-text" class="hidden"></pre>
+          <div id="d-thread"></div>
+        </section>
+
+        <!-- settings -->
+        <section id="view-settings" class="hidden">
+          <div class="toolbar"><button id="settings-back">← Back</button></div>
+          <h2>Addresses</h2>
+          <p class="meta">Each row is a live mailbox: <code>local@<span class="domain"></span></code>. Unknown addresses are rejected at SMTP time.</p>
+          <table class="table" id="addr-table">
+            <thead><tr><th>Address</th><th>Display name</th><th>Forward to</th><th>Active</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <div class="row">
+            <input id="addr-new" placeholder="local part, e.g. hello">
+            <input id="addr-name" placeholder="display name (optional)">
+            <button id="addr-add">Add address</button>
+          </div>
+
+          <h2>Blocklist</h2>
+          <p class="meta">Mail from blocked senders is stored as spam and never forwarded or notified.</p>
+          <ul id="block-list" class="plain-list"></ul>
+          <div class="row">
+            <input id="block-new" placeholder="spammer@example.com">
+            <button id="block-add">Block</button>
+          </div>
+
+          <h2>Notifications</h2>
+          <p class="meta" id="push-status"></p>
+          <button id="push-subscribe">Enable browser notifications</button>
+        </section>
+      </main>
+    </div>
+
+    <!-- compose -->
+    <div id="compose" class="modal hidden">
+      <div class="modal-card">
+        <h2 id="compose-title">New message</h2>
+        <label>From
+          <select id="c-from"></select>
+        </label>
+        <label>To <input id="c-to" type="email" placeholder="someone@example.com"></label>
+        <label>Cc <input id="c-cc" placeholder="comma separated (optional)"></label>
+        <label>Subject <input id="c-subject"></label>
+        <textarea id="c-body" rows="10" placeholder="Plain text body"></textarea>
+        <div class="row right">
+          <button id="c-cancel">Cancel</button>
+          <button id="c-send" class="primary">Send</button>
+        </div>
+        <p id="c-error" class="error"></p>
+      </div>
+    </div>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

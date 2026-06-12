@@ -1,0 +1,56 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cf-mail",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-23",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Your email domain — used for sender addresses (local@MAIL_DOMAIN).
+  "vars": {
+    "MAIL_DOMAIN": "example.com"
+  },
+
+  // Create with: wrangler d1 create cf-mail
+  // then paste the database_id below and apply schema.sql.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "cf-mail",
+      "database_id": "REPLACE_WITH_YOUR_D1_ID"
+    }
+  ],
+
+  // Create with: wrangler r2 bucket create cf-mail
+  "r2_buckets": [
+    {
+      "binding": "R2",
+      "bucket_name": "cf-mail"
+    }
+  ],
+
+  // Outbound mail via Cloudflare Email Service. IMPORTANT: after enabling the
+  // service in the dashboard you MUST redeploy this worker — the binding
+  // attaches to the service at deploy time. Symptoms of forgetting: mail
+  // lands in spam (no DKIM) and the dashboard send counter stays at 0.
+  "send_email": [{ "name": "SEND_EMAIL" }],
+
+  // The web UI.
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
+
+  "observability": {
+    "enabled": true
+  }
+
+  // Secrets (set with `wrangler secret put <NAME>`):
+  //   AUTH_TOKEN          required — Bearer token for the API/UI
+  //   VAPID_PUBLIC_KEY    optional — Web Push
+  //   VAPID_PRIVATE_KEY   optional — Web Push
+  //   VAPID_SUBJECT       optional — e.g. mailto:you@example.com
+  //   APNS_TEAM_ID        optional — native iOS push
+  //   APNS_TOPIC          optional — app bundle id
+  //   APNS_KEY_ID         optional
+  //   APNS_PRIVATE_KEY    optional — .p8 PEM contents
+}
