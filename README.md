@@ -4,7 +4,7 @@
 
 A self-hosted mailbox for your own domain that runs **entirely on Cloudflare** — receiving, sending, storage, a web client, and push notifications. No VPS, no Postfix, no IP-reputation babysitting. One Worker, one D1 database, one R2 bucket.
 
-> Running in production at **[xtxt.top](https://xtxt.top)**, where it handles all mail for the domain. Full build story (Chinese): [把邮箱整个搬进 Cloudflare](https://xtxt.top/articles/self-hosted-email-on-cloudflare-workers).
+> Running in production at **[xtxt.top](https://xtxt.top)**, where it handles all mail for the domain. Full build story: [I Moved My Email Onto Cloudflare Workers](https://xtxt.top/articles/email-on-cloudflare-workers) (English) · [把邮箱整个搬进 Cloudflare](https://xtxt.top/articles/self-hosted-email-on-cloudflare-workers) (中文).
 
 ```
 receive   MX → Cloudflare Email Routing (free)
