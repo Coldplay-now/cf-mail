@@ -145,14 +145,31 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
         501
       );
     }
-    const body = (await request.json()) as {
-      from: string; // local part
-      to: string;
-      cc?: string;
-      subject: string;
-      text: string;
-      inReplyToId?: string;
-    };
+    // JSON for plain sends; multipart/form-data when attachments ride along
+    // (fields + repeated "attachments" file parts, ≤5 MiB total per message).
+    let body: { from: string; to: string; cc?: string; subject: string; text: string; inReplyToId?: string };
+    let files: File[] = [];
+    if (request.headers.get("content-type")?.includes("multipart/form-data")) {
+      const form = await request.formData();
+      body = {
+        from: String(form.get("from") ?? ""),
+        to: String(form.get("to") ?? ""),
+        cc: String(form.get("cc") ?? ""),
+        subject: String(form.get("subject") ?? ""),
+        text: String(form.get("text") ?? ""),
+        inReplyToId: String(form.get("inReplyToId") ?? "") || undefined
+      };
+      // workers-types declares getAll(): string[]; at runtime file parts are File.
+      files = (form.getAll("attachments") as unknown as (File | string)[]).filter(
+        (f): f is File => typeof f !== "string" && f.size > 0
+      );
+      const total = files.reduce((n, f) => n + f.size, 0);
+      if (total > 5 * 1024 * 1024) {
+        return json({ error: "attachments exceed the 5 MiB per-message limit" }, 400);
+      }
+    } else {
+      body = (await request.json()) as typeof body;
+    }
     const box = await env.DB.prepare("SELECT * FROM addresses WHERE address = ? AND active = 1")
       .bind(body.from.toLowerCase())
       .first<{ address: string; display_name: string | null }>();
@@ -173,6 +190,20 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
       ? [original.refs, original.message_id].filter(Boolean).join(" ") || null
       : null;
 
+    // Attachments: read once, send via the binding, and keep a copy in R2 so
+    // the sent mail shows (and serves) them in the UI like received mail does.
+    const attachmentMeta: { key: string; filename: string; mime: string; size: number }[] = [];
+    const outAttachments: NonNullable<Parameters<NonNullable<Env["SEND_EMAIL"]>["send"]>[0]["attachments"]> = [];
+    for (const [i, file] of files.entries()) {
+      const buf = await file.arrayBuffer();
+      const mime = file.type || "application/octet-stream";
+      const filename = file.name || `attachment-${i + 1}`;
+      outAttachments.push({ filename, content: buf, type: mime, disposition: "attachment" });
+      const key = `mail/${id}/${i + 1}-${filename.replace(/[^\w.\-]+/g, "_").slice(0, 80)}`;
+      await env.R2.put(key, buf, { httpMetadata: { contentType: mime } });
+      attachmentMeta.push({ key, filename, mime, size: file.size });
+    }
+
     let status = "sent";
     let sendError: string | null = null;
     try {
@@ -182,7 +213,8 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
         ...(ccList.length ? { cc: ccList } : {}),
         subject: body.subject,
         html,
-        text: body.text
+        text: body.text,
+        ...(outAttachments.length ? { attachments: outAttachments } : {})
       });
     } catch (error) {
       status = "failed";
@@ -191,8 +223,8 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
 
     await env.DB.prepare(
       `INSERT INTO mails (id, direction, status, in_reply_to, refs, thread_key,
-         from_addr, from_name, to_addr, cc_addr, subject, text_body, html_body, snippet, read)
-       VALUES (?, 'out', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
+         from_addr, from_name, to_addr, cc_addr, subject, text_body, html_body, snippet, attachments, read)
+       VALUES (?, 'out', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
     )
       .bind(
         id,
@@ -207,7 +239,8 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
         body.subject,
         body.text,
         html,
-        snippetOf(body.text, null)
+        snippetOf(body.text, null),
+        attachmentMeta.length ? JSON.stringify(attachmentMeta) : null
       )
       .run();
 

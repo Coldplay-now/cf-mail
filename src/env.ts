@@ -8,6 +8,14 @@ export interface SendEmailBinding {
     subject: string;
     html?: string;
     text?: string;
+    // ≤5 MiB total per message (25 MiB only to verified destinations).
+    attachments?: {
+      filename: string;
+      content: ArrayBuffer;
+      type: string;
+      disposition: "attachment" | "inline";
+      contentId?: string;
+    }[];
   }): Promise<unknown>;
 }
 

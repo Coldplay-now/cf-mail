@@ -69,7 +69,7 @@ npm run deploy
 | `GET /api/mails/:id` | 全文 + 会话，自动标已读 |
 | `PATCH /api/mails/:id` | `{read?, archived?, spam?}` |
 | `DELETE /api/mails/:id` | 删除（连同 R2 附件） |
-| `POST /api/send` | `{from, to, cc?, subject, text, inReplyToId?}` |
+| `POST /api/send` | JSON `{from, to, cc?, subject, text, inReplyToId?}`, or multipart with `attachments` file parts (≤5 MiB) |
 | `GET /api/attachments?key=` | 附件流式下载 |
 | `GET/POST /api/addresses`、`PATCH/DELETE /api/addresses/:id` | 邮箱地址 CRUD |
 | `GET/POST /api/contacts`、`DELETE /api/contacts/:address` | 联系人 + 黑名单 |
@@ -90,7 +90,7 @@ curl -X POST https://mail.yourdomain.com/api/send \
 ## 成本与边界
 
 - **收信：免费**（Email Routing 不限量）。个人邮件量级的 D1/R2 用量可以忽略。
-- **发信：Workers Paid（$5/月）**——本文写作时含每月 3,000 封。Email Service 仍在公测：单封收件人 ≤50，**发信暂不支持附件**（收信附件经 R2 无限制）。
+- **发信：Workers Paid（$5/月）**——本文写作时含每月 3,000 封。Email Service 仍在公测：单封收件人 ≤50；**收发均支持附件**（发信单封 ≤5 MiB；收信经 R2 无限制）。
 - **没有 IMAP/POP**——第三方邮件客户端接不进来，界面就是这个网页客户端（或你基于 API 自建的 UI）。对一些人是硬伤，对另一些人是特性。
 - 设计上单用户。多租户权限体系不在范围内。
 

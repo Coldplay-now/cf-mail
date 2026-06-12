@@ -223,6 +223,7 @@ async function openCompose(prefill = {}) {
   $("#c-cc").value = "";
   $("#c-subject").value = prefill.subject || "";
   $("#c-body").value = "";
+  $("#c-files").value = "";
   $("#c-error").textContent = "";
   $("#compose").classList.remove("hidden");
 }
@@ -231,17 +232,38 @@ $("#c-cancel").onclick = () => $("#compose").classList.add("hidden");
 $("#c-send").onclick = async () => {
   try {
     $("#c-send").disabled = true;
-    await api("/send", {
-      method: "POST",
-      body: JSON.stringify({
-        from: $("#c-from").value,
-        to: $("#c-to").value.trim(),
-        cc: $("#c-cc").value.trim(),
-        subject: $("#c-subject").value.trim(),
-        text: $("#c-body").value,
-        inReplyToId: state.replyTo
-      })
-    });
+    const files = [...$("#c-files").files];
+    const total = files.reduce((n, f) => n + f.size, 0);
+    if (total > 5 * 1024 * 1024) throw new Error("Attachments exceed the 5 MiB per-message limit");
+    if (files.length) {
+      // multipart when attachments ride along
+      const form = new FormData();
+      form.append("from", $("#c-from").value);
+      form.append("to", $("#c-to").value.trim());
+      form.append("cc", $("#c-cc").value.trim());
+      form.append("subject", $("#c-subject").value.trim());
+      form.append("text", $("#c-body").value);
+      if (state.replyTo) form.append("inReplyToId", state.replyTo);
+      for (const f of files) form.append("attachments", f);
+      const res = await fetch("/api/send", {
+        method: "POST",
+        headers: { Authorization: "Bearer " + state.token },
+        body: form
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "HTTP " + res.status);
+    } else {
+      await api("/send", {
+        method: "POST",
+        body: JSON.stringify({
+          from: $("#c-from").value,
+          to: $("#c-to").value.trim(),
+          cc: $("#c-cc").value.trim(),
+          subject: $("#c-subject").value.trim(),
+          text: $("#c-body").value,
+          inReplyToId: state.replyTo
+        })
+      });
+    }
     $("#compose").classList.add("hidden");
     loadList();
   } catch (e) {

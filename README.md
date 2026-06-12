@@ -69,7 +69,7 @@ Everything under `/api/*` takes `Authorization: Bearer <AUTH_TOKEN>`:
 | `GET /api/mails/:id` | full mail + conversation, marks read |
 | `PATCH /api/mails/:id` | `{read?, archived?, spam?}` |
 | `DELETE /api/mails/:id` | delete (and its R2 attachments) |
-| `POST /api/send` | `{from, to, cc?, subject, text, inReplyToId?}` |
+| `POST /api/send` | JSON `{from, to, cc?, subject, text, inReplyToId?}`, or multipart with `attachments` file parts (≤5 MiB) |
 | `GET /api/attachments?key=` | stream an attachment |
 | `GET/POST /api/addresses`, `PATCH/DELETE /api/addresses/:id` | mailbox CRUD |
 | `GET/POST /api/contacts`, `DELETE /api/contacts/:address` | contacts + blocklist |
@@ -90,7 +90,7 @@ curl -X POST https://mail.yourdomain.com/api/send \
 ## Costs & limits
 
 - **Receiving: free** (Email Routing has no volume cap). D1/R2 usage for personal mail is negligible.
-- **Sending: Workers Paid ($5/mo)** — 3,000 emails/month included at the time of writing. Email Service is in beta: ≤50 recipients per message, **no outbound attachments yet** (inbound attachments are unlimited via R2).
+- **Sending: Workers Paid ($5/mo)** — 3,000 emails/month included at the time of writing. Email Service is in beta: ≤50 recipients per message; **attachments supported both ways** (outbound ≤5 MiB per message; inbound unlimited via R2).
 - **No IMAP/POP** — third-party mail clients can't connect; the web client (or your own UI on the API) is the interface. For some that's the dealbreaker, for others the feature.
 - Single-user by design. Multi-tenant auth is out of scope.
 
