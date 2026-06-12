@@ -6,6 +6,14 @@
 
 > 本项目在 **[xtxt.top](https://xtxt.top)** 生产环境运行，承担该域名的全部邮件收发。完整实战记录：[把邮箱整个搬进 Cloudflare](https://xtxt.top/articles/self-hosted-email-on-cloudflare-workers)。
 
+![cf-mail inbox](docs/screenshots/inbox.png)
+
+<table><tr>
+<td width="33%"><a href="docs/screenshots/detail.png"><img src="docs/screenshots/detail.png" alt="Mail detail"></a></td>
+<td width="33%"><a href="docs/screenshots/compose.png"><img src="docs/screenshots/compose.png" alt="Compose"></a></td>
+<td width="33%"><a href="docs/screenshots/settings.png"><img src="docs/screenshots/settings.png" alt="Settings"></a></td>
+</tr></table>
+
 ```
 收信   MX → Cloudflare Email Routing（免费）
          └─ catch-all → 本 Worker

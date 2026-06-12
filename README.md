@@ -6,6 +6,14 @@ A self-hosted mailbox for your own domain that runs **entirely on Cloudflare** �
 
 > Running in production at **[xtxt.top](https://xtxt.top)**, where it handles all mail for the domain. Full build story: [I Moved My Email Onto Cloudflare Workers](https://xtxt.top/articles/email-on-cloudflare-workers) (English) · [把邮箱整个搬进 Cloudflare](https://xtxt.top/articles/self-hosted-email-on-cloudflare-workers) (中文).
 
+![cf-mail inbox](docs/screenshots/inbox.png)
+
+<table><tr>
+<td width="33%"><a href="docs/screenshots/detail.png"><img src="docs/screenshots/detail.png" alt="Mail detail"></a></td>
+<td width="33%"><a href="docs/screenshots/compose.png"><img src="docs/screenshots/compose.png" alt="Compose"></a></td>
+<td width="33%"><a href="docs/screenshots/settings.png"><img src="docs/screenshots/settings.png" alt="Settings"></a></td>
+</tr></table>
+
 ```
 receive   MX → Cloudflare Email Routing (free)
             └─ catch-all → this Worker
