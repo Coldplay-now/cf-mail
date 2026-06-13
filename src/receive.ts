@@ -110,5 +110,50 @@ export async function receiveEmail(message: InboundEmailMessage, env: Env): Prom
       subject: parsed.subject ?? null,
       snippet: snippetOf(parsed.text, parsed.html)
     });
+    await notifyAgentWebhook(env, {
+      id,
+      messageId: parsed.messageId ?? null,
+      inReplyTo: parsed.inReplyTo ?? null,
+      references: parsed.references ?? null,
+      from: { address: fromAddr, name: parsed.from?.name || null },
+      to: toAddr,
+      cc: ccAddr,
+      subject: parsed.subject ?? null,
+      snippet: snippetOf(parsed.text, parsed.html),
+      text: parsed.text ?? null,
+      attachments: attachments.map(({ filename, mime, size }) => ({ filename, mime, size })),
+      authResults: parsed.headers?.find((h) => h.key.toLowerCase() === "authentication-results")?.value ?? ""
+    });
+  }
+}
+
+// POST a signed JSON summary of new inbound mail to the agent webhook (if
+// configured). Best-effort. `trust.knownContact` lets an agent treat
+// unknown-sender mail as untrusted data rather than instructions
+// (prompt-injection hygiene); `trust.dkimPass` reflects Cloudflare's
+// Authentication-Results header.
+async function notifyAgentWebhook(env: Env, p: Record<string, unknown> & { authResults: string }) {
+  if (!env.AGENT_WEBHOOK_URL) return;
+  try {
+    const from = p.from as { address: string };
+    const known = await env.DB.prepare("SELECT 1 FROM contacts WHERE address = ?").bind(from.address).first();
+    const { authResults, ...rest } = p;
+    const body = JSON.stringify({
+      event: "mail.received",
+      ...rest,
+      receivedAt: new Date().toISOString(),
+      trust: { knownContact: Boolean(known), dkimPass: /dkim=pass/i.test(authResults) }
+    });
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (env.AGENT_WEBHOOK_SECRET) {
+      const key = await crypto.subtle.importKey(
+        "raw", new TextEncoder().encode(env.AGENT_WEBHOOK_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+      );
+      const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
+      headers["X-CF-Mail-Signature"] = "sha256=" + [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    }
+    await fetch(env.AGENT_WEBHOOK_URL, { method: "POST", headers, body });
+  } catch (error) {
+    console.error("agent webhook failed", error);
   }
 }

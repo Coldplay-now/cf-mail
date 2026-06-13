@@ -41,6 +41,11 @@ export interface Env {
   APNS_TOPIC?: string; // app bundle id
   APNS_KEY_ID?: string;
   APNS_PRIVATE_KEY?: string; // .p8 PEM contents
+
+  // Optional: agent webhook — POST a signed JSON summary of each inbound
+  // (non-spam) mail so an agent is triggered by new mail instead of polling.
+  AGENT_WEBHOOK_URL?: string;
+  AGENT_WEBHOOK_SECRET?: string; // HMAC-SHA256 key; signature in X-CF-Mail-Signature
 }
 
 export const json = (data: unknown, status = 200) =>

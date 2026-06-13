@@ -42,6 +42,7 @@ The point of this architecture: **your mail becomes ordinary rows in your own da
 - **Push, two channels** — Web Push (VAPID) for browsers/PWA, and APNs **directly from the Worker** for your own iOS client. Workers' outbound `fetch` negotiates the HTTP/2 APNs requires — verified in production, no relay needed.
 - **Honest failure semantics** — if the Worker throws during receive, the sender's MTA retries per SMTP. Mail is delayed, not lost.
 - **An API your scripts can use** — send a notification mail from CI or an AI agent with one `curl`.
+- **Agent webhook** — set `AGENT_WEBHOOK_URL` and every inbound (non-spam) mail is POSTed to it as a signed JSON summary (HMAC in `X-CF-Mail-Signature`), so an agent is *triggered* by new mail instead of polling. The payload carries a `trust` block (`knownContact`, `dkimPass`) so an agent can treat unknown-sender mail as untrusted data, not instructions.
 
 ## Quick start
 
@@ -74,6 +75,8 @@ Everything under `/api/*` takes `Authorization: Bearer <AUTH_TOKEN>`:
 | `GET/POST /api/addresses`, `PATCH/DELETE /api/addresses/:id` | mailbox CRUD |
 | `GET/POST /api/contacts`, `DELETE /api/contacts/:address` | contacts + blocklist |
 | `GET /api/push/key`, `POST/DELETE /api/push` | push subscriptions |
+
+**Agent webhook** (optional): set the `AGENT_WEBHOOK_URL` (and `AGENT_WEBHOOK_SECRET`) secrets and each inbound mail POSTs `{event:"mail.received", id, from, to, subject, snippet, text, attachments, trust:{knownContact,dkimPass}, ...}` to your agent. Verify `X-CF-Mail-Signature: sha256=<hmac>` against the raw body.
 
 ```bash
 curl -X POST https://mail.yourdomain.com/api/send \
