@@ -2,7 +2,7 @@
 
 **Status:** v0.1 (finalized) · 中文版: [AGENT_MAIL_PROTOCOL.zh-CN.md](AGENT_MAIL_PROTOCOL.zh-CN.md) · **Substrate:** Cloudflare (Email Routing + Workers + D1 + R2), as implemented by [cf-mail](../README.md)
 
-> v0.1 settles the five core decisions (§2.1 bounded correspondents, §3 store-as-queue + ack, §6 trust boundary, §7 correlation, §10 scoped tokens). Remaining open items (§12) are implementation details, not design forks.
+> v0.1 settles the five core decisions (§2.1 bounded correspondents, §3 store-as-queue + ack, §6 trust boundary, §7 correlation, §10 scoped tokens). Remaining open items (§13) are implementation details, not design forks.
 
 AMP is the contract between a **mail system** and an **autonomous agent that owns a mailbox**. It defines how inbound mail reaches an agent, how the agent acknowledges and acts on it, how request/reply is correlated, and — most importantly — how the trust boundary is expressed so an agent can safely consume untrusted mail.
 
@@ -234,11 +234,65 @@ Both directions are first-class:
 
 One agent = one mailbox = one webhook + one **address-scoped token**. The token can only send-as and read its own mailbox — a leaked agent token cannot read other mailboxes, cannot send as other addresses, and cannot mint new tokens. Least privilege is the default, not an option.
 
-## 11. Versioning
+## 11. Using the mailbox as a tool
+
+The wire protocol above is how mail moves. This section is how an agent *uses* the mailbox as a tool it reasons with — three things that the protocol layer does not cover but that decide whether the mailbox is usable and safe in practice.
+
+### 11.1 Self-describing tool surface
+
+When the mailbox is handed to an agent, each operation MUST carry an explicit, effective description: what it does, when to use it, its parameters, and — crucially — the constraints baked in. *"Send: delivers a message; recipients are restricted to this mailbox's allowlist; a disallowed recipient fails the whole call"* is a better tool description than *"send an email,"* because it shapes the agent's behaviour up front instead of only failing it after the fact.
+
+The mailbox SHOULD expose a manifest the agent can read to understand its own boundaries:
+
+```
+GET /api/agent/<mailbox>/manifest
+{
+  "address": "claudecode@xtxt.top",
+  "purpose": "deploy approvals and status digests for XT",
+  "operations": [ { "name": "send", "description": "…", "constraints": ["recipients allowlisted", "≤5MiB attachments"] }, … ],
+  "outboundAllowed": ["xt@xtxt.top"],          // or a redacted hint when the list is private
+  "scopes": ["mail:send@self", "mail:read@self"],
+  "rules": [ … see 11.2 … ],
+  "limits": { "perMessageRecipients": 50, "monthlyQuota": 3000 }
+}
+```
+
+Two principles, both required, neither replacing the other: the tool **declares its constraints** (so a well-behaved agent never even attempts what would be refused), and the system **enforces them anyway** (so a misbehaving or hijacked agent cannot cross them).
+
+### 11.2 User rules (the owner's policy)
+
+The owner declares rules that govern how the agent uses the mailbox. They come in two kinds, and the distinction is load-bearing:
+
+- **Hard rules — system-enforced, never trusted to the agent.** The recipient allowlist (§2.1), scopes (§10), quotas. Checked at the boundary; the agent literally cannot violate them.
+- **Soft rules — declared policy the agent is expected to follow.** e.g. "summarise before forwarding," "ask me before replying to a first-time sender," "auto-handle service receipts but escalate anything from a person," tone, quiet hours. Behavioural; surfaced to the agent (via the manifest / its context) so they shape its judgement.
+
+Both live in one place — a per-mailbox policy the owner edits — and the manifest exposes them to the agent. The security-relevant subset is *also* compiled into hard enforcement. A soft rule that turns out to be security-critical should be promoted to a hard rule over time.
+
+### 11.3 Agent-friendly observability
+
+Human mail observability answers "did I read it." Agent observability must answer "what did the agent (and the system) **do**, and **why**" — for the agent itself, for the supervising human, and for another agent watching. It must be **structured and efficient**, not a UI to eyeball.
+
+The mailbox exposes an append-only **event log**, queryable by cursor / filter / correlation:
+
+```
+GET /api/agent/<mailbox>/events?since=<cursor>&correlationId=<id>
+```
+
+Every consequential moment is one structured event with a **reason code**:
+
+- `received` · `rejected{reason: not_allowlisted | blocked | mailbox_inactive}`
+- `delivered` · `delivery_failed{attempt, reason}`
+- `handled{result: done | escalated | rejected}`
+- `sent` · `send_refused{reason: recipient_not_allowed | over_quota | bad_request}`
+- `escalated{to}`
+
+Two properties make it agent-friendly. **Reason codes close the loop:** when a hard rule blocks something — a send refused, an inbound rejected — the agent and the user get a machine-readable *why*, never silence. **Correlation tags** let you pull a whole task's mail activity in one query. Efficiency is first-class: compact JSON, cursors, server-side filtering, so a supervising loop can poll the trail cheaply. The same events, rendered, are the human's "what is my agent doing" view.
+
+## 12. Versioning
 
 Every payload carries `schemaVersion`. Evolution is **additive only** within a major version; consumers ignore unknown fields. The mail system and the agent iterate independently, so the wire format must tolerate version skew in both directions.
 
-## 12. Open questions (v0.1)
+## 13. Open questions (v0.1)
 
 1. **Redelivery on unacked timeout** — bounded auto-redeliver (requires agent idempotency, which AMP already mandates) vs. pull-only recovery. Leaning auto-redeliver.
 2. **Trust granularity** — expose the four booleans and let the agent combine them, vs. also precomputing a single `trustLevel: trusted|known|unknown`. Leaning "both: booleans + a derived convenience level."
@@ -270,6 +324,9 @@ Every payload carries `schemaVersion`. Evolution is **additive only** within a m
 | Pull API (`/inbox?state=open`) | ⛔ planned (today: `GET /api/mails`) |
 | Correlation via `Reply-To` plus-addressing | ⚠️ plus-addressing folds on receive; corrId minting on send not yet wired |
 | Escalation (`agent → human`) | ⛔ planned |
+| Self-describing manifest (§11.1) | ⛔ planned |
+| User rules — hard (enforced) + soft (declared) (§11.2) | ⚠️ hard rules exist as blocklist/scopes; unified policy + soft rules planned |
+| Agent observability — event log + reason codes (§11.3) | ⚠️ Workers Logs only; structured per-mailbox event log planned |
 
 This table is the build backlog: the spec is the target, and cf-mail grows into it one additive change at a time.
 

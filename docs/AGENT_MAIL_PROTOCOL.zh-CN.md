@@ -2,7 +2,7 @@
 
 **状态：** v0.1（定稿） · English: [AGENT_MAIL_PROTOCOL.md](AGENT_MAIL_PROTOCOL.md) · **底座：** Cloudflare（Email Routing + Workers + D1 + R2），参考实现见 [cf-mail](../README.md)
 
-> v0.1 敲定五项核心决策（§2.1 有界通信、§3 存储即队列 + ack、§6 信任边界、§7 关联、§10 最小权限令牌）。剩下的开放项（§12）只是实现细节，不再是设计岔路。
+> v0.1 敲定五项核心决策（§2.1 有界通信、§3 存储即队列 + ack、§6 信任边界、§7 关联、§10 最小权限令牌）。剩下的开放项（§13）只是实现细节，不再是设计岔路。
 
 AMP 是**邮件系统**与**拥有一个邮箱的自治智能体（agent）**之间的契约。它规定来信如何抵达 agent、agent 如何确认与处理、请求与回信如何关联，以及最重要的——如何把信任边界表达清楚，让 agent 能安全地消费不可信邮件。
 
@@ -234,11 +234,65 @@ POST /api/agent/<mailbox>/send
 
 一个 agent = 一个邮箱 = 一个 webhook + 一把**按地址绑定的令牌**。该令牌只能以自己的地址发信、只能读自己的邮箱——一把泄露的 agent 令牌读不到别的邮箱、不能以别的地址发信、也不能铸新令牌。最小权限是默认，不是选项。
 
-## 11. 版本
+## 11. 把邮箱当工具用
+
+上面的网线协议讲的是邮件怎么传。这一节讲 agent 怎么把邮箱**当成它推理用的工具**——三件协议层不覆盖、却决定邮箱在实战中是否好用、是否安全的事。
+
+### 11.1 自描述的工具表面
+
+把邮箱交给 agent 时，每个操作都**必须**带显式、有效的描述：做什么、何时用、参数，以及——关键——内建的约束是什么。*「send：投递一封信；收件人限于本邮箱白名单；有不被许可的收件人则整次调用失败」* 比 *「发一封邮件」* 是更好的工具描述，因为它在事前**塑造** agent 的行为，而不是事后才让它失败。
+
+邮箱**应当**暴露一份 manifest，让 agent 读懂自己的边界：
+
+```
+GET /api/agent/<mailbox>/manifest
+{
+  "address": "claudecode@xtxt.top",
+  "purpose": "给 XT 做部署审批与状态摘要",
+  "operations": [ { "name": "send", "description": "…", "constraints": ["收件人走白名单", "附件 ≤5MiB"] }, … ],
+  "outboundAllowed": ["xt@xtxt.top"],          // 名单私有时给个脱敏提示
+  "scopes": ["mail:send@self", "mail:read@self"],
+  "rules": [ … 见 11.2 … ],
+  "limits": { "perMessageRecipients": 50, "monthlyQuota": 3000 }
+}
+```
+
+两条原则，都要，谁也不替代谁：工具**声明约束**（让守规矩的 agent 根本不去尝试会被拒的事），系统**照样强制**（让不守规矩或被劫持的 agent 跨不过去）。
+
+### 11.2 用户 rules（拥有者的策略）
+
+邮箱拥有者声明规则，管 agent 怎么用它。规则分两类，区分很关键：
+
+- **硬规则——系统强制，绝不信任 agent。** 收件人白名单（§2.1）、scope（§10）、额度。在边界处校验；agent 根本无法违反。
+- **软规则——声明的策略，期望 agent 遵循。** 如「转发前先摘要」「回陌生人之前先问我」「服务回执自动处理、人来信一律升级」、语气、静默时段。属行为层；通过 manifest / agent 的上下文透出，塑造它的判断。
+
+两者写在一处——拥有者编辑的「每邮箱策略」——manifest 把它们透给 agent。安全相关的那部分**同时**编译进硬强制。一条软规则若被证明事关安全，应逐步提升为硬规则。
+
+### 11.3 agent 友好的可观测性
+
+人的邮件可观测回答「我读了没」。agent 的可观测必须回答「agent（和系统）**做了什么、为什么**」——给 agent 自己、给盯着的人、给监管它的另一个 agent。它必须**结构化、高效**，不是拿来肉眼看的 UI。
+
+邮箱暴露一条只追加的**事件日志**，可按游标 / 过滤 / 关联查询：
+
+```
+GET /api/agent/<mailbox>/events?since=<cursor>&correlationId=<id>
+```
+
+每个有后果的时刻都是一条带 **reason code** 的结构化事件：
+
+- `received` · `rejected{reason: not_allowlisted | blocked | mailbox_inactive}`
+- `delivered` · `delivery_failed{attempt, reason}`
+- `handled{result: done | escalated | rejected}`
+- `sent` · `send_refused{reason: recipient_not_allowed | over_quota | bad_request}`
+- `escalated{to}`
+
+两个性质让它对 agent 友好。**reason code 闭环**：当硬规则挡掉一件事（拒发、拒收），agent 和用户拿到的是机器可读的「为什么」，而非沉默。**关联标签**：一次查询就能拉出整个任务的邮件活动。效率是一等要求：紧凑 JSON、游标、服务端过滤，让监管回路能廉价地轮询这条轨迹。同一批事件渲染出来，就是人看的「我的 agent 在干嘛」。
+
+## 12. 版本
 
 每个载荷带 `schemaVersion`。同一大版本内**只做加法**演进；消费方忽略未知字段。邮件系统和 agent 各自独立迭代，所以网线格式必须能容忍双向的版本错位。
 
-## 12. 开放问题（v0.1）
+## 13. 开放问题（v0.1）
 
 1. **未 ack 超时的重投** — 有上限的自动重投（要求 agent 幂等，AMP 本就强制）vs 仅靠拉取恢复。倾向自动重投。
 2. **信任粒度** — 暴露四个布尔让 agent 自己组合 vs 再预计算一个 `trustLevel: trusted|known|unknown`。倾向「两者都给：布尔 + 一个派生的便捷等级」。
@@ -270,6 +324,9 @@ POST /api/agent/<mailbox>/send
 | 拉取 API（`/inbox?state=open`） | ⛔ 规划中（现状：`GET /api/mails`） |
 | 经 `Reply-To` plus 地址做关联 | ⚠️ 收信时已折叠 plus 地址；发信时铸 corrId 尚未接 |
 | 升级（`agent → 人`） | ⛔ 规划中 |
+| 自描述 manifest（§11.1） | ⛔ 规划中 |
+| 用户 rules——硬（强制）+ 软（声明）（§11.2） | ⚠️ 硬规则以黑名单/scope 形式存在；统一策略 + 软规则规划中 |
+| agent 可观测——事件日志 + reason code（§11.3） | ⚠️ 仅 Workers Logs；结构化的每邮箱事件日志规划中 |
 
 这张表就是 build backlog：spec 是目标，cf-mail 一次一个加法地长成它。
 
