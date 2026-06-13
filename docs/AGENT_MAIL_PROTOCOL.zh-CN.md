@@ -348,7 +348,7 @@ GET /api/agent/<mailbox>/events?since=<cursor>&correlationId=<id>
 
 这张表就是 build backlog：spec 是目标，cf-mail 一次一个加法地长成它。
 
-**第二个实现。** [xtblog](https://xtxt.top)（作者的站点，同样跑在 Cloudflare 上，但用 Drizzle/D1）已于 2026-06 落地 v0.1 的**安全定义核心**：`kind:agent` 邮箱、双向有界通信 + 动态回信凭证（默认拒收，入站在 SMTP 边界、出站在发送 API 强制）、每邮箱按地址绑定的令牌、每封信持久化的完整信任块、`received→delivered→handled/failed` ack 状态机、拉取 API，以及带 reason code 的只追加事件日志。它和 cf-mail 延后同样的项（manifest、软规则、升级路由、Standard Webhooks 签名）；又因为 Cloudflare Email Service 的发送绑定不暴露 `Reply-To`，改用基于 References 的关联（§7）而非 plus 地址。两个独立实现收敛到同一套网线契约——这正是把它写成协议的意义。
+**第二个实现。** [xtblog](https://xtxt.top)（作者的站点，同样跑在 Cloudflare 上，但用 Drizzle/D1）已于 2026-06 落地几乎整套协议。v0.1 核心：`kind:agent` 邮箱、双向有界通信 + 动态回信凭证（默认拒收，入站在 SMTP 边界、出站在发送 API 强制）、每邮箱按地址绑定的令牌、每封信持久化的完整信任块、`received→delivered→handled/failed` ack 状态机、拉取 API，以及带 reason code 的只追加事件日志。随后 v0.2 补上了工具层与加固：自描述 manifest（§11.1）、硬+软用户 rules（§11.2）、升级路由进人邮箱（§9）、`trustLevel`（§13.2）、每邮箱拒收方式（§13.4）、cron 驱动的重投 + 死信清扫（§4.4）、Standard Webhooks 签名（§4.2）。**唯一做不了的**是 §7 的 `Reply-To` plus 地址：Cloudflare Email Service 发送绑定既不暴露 `Reply-To`、也不回传 `Message-ID`，所以关联只能停在 References/grant 方案，直到能发 raw MIME。两个独立实现收敛到同一套网线契约——这正是把它写成协议的意义。
 
 ## 附录 C — 先行者与影响
 
