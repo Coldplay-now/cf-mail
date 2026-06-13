@@ -42,6 +42,7 @@
 - **双通道推送**——浏览器/PWA 走 Web Push（VAPID）；自己的 iOS 客户端走 APNs，且是 **Worker 直连**——Workers 的出站 `fetch` 能协商 APNs 要求的 HTTP/2，生产环境实证可行，不需要任何中转。
 - **诚实的失败语义**——收信过程中 Worker 抛异常时，发件方邮件服务器按 SMTP 规范自动重试。邮件只会延迟，不会丢。
 - **脚本友好的 API**——CI 或 AI Agent 一条 `curl` 就能发通知邮件。
+- **Agent 邮件协议**——见 [Agent Mail Protocol（AMP）规范](docs/AGENT_MAIL_PROTOCOL.zh-CN.md)：把「给 agent 的邮箱」沉淀成协议（两类邮箱、双向有界通信、信任边界、来信即触发的投递队列）。
 
 ## 快速开始
 

@@ -1,6 +1,8 @@
 # Agent Mail Protocol (AMP)
 
-**Status:** Draft v0.1 · **Substrate:** Cloudflare (Email Routing + Workers + D1 + R2), as implemented by [cf-mail](../README.md)
+**Status:** v0.1 (finalized) · 中文版: [AGENT_MAIL_PROTOCOL.zh-CN.md](AGENT_MAIL_PROTOCOL.zh-CN.md) · **Substrate:** Cloudflare (Email Routing + Workers + D1 + R2), as implemented by [cf-mail](../README.md)
+
+> v0.1 settles the five core decisions (§2.1 bounded correspondents, §3 store-as-queue + ack, §6 trust boundary, §7 correlation, §10 scoped tokens). Remaining open items (§12) are implementation details, not design forks.
 
 AMP is the contract between a **mail system** and an **autonomous agent that owns a mailbox**. It defines how inbound mail reaches an agent, how the agent acknowledges and acts on it, how request/reply is correlated, and — most importantly — how the trust boundary is expressed so an agent can safely consume untrusted mail.
 
@@ -149,15 +151,11 @@ GET /api/agent/<mailbox>/inbox?state=open&since=<cursor>
 
 Returns open (unacked) messages in the same payload shape, with a cursor for incremental polling. This is the safety net under the webhook.
 
-### 4.6 Transports (webhook is one of several)
+### 4.6 Transport
 
-The payload and semantics above are transport-independent. An implementation MAY offer the same `mail.received` event over additional channels, and SHOULD pick what fits the agent's runtime:
+AMP defines the *event and its semantics* (`mail.received`, the payload, the trust split, idempotency) at the protocol layer. The canonical transport is the **signed webhook** (§4.2) with the **pull API** (§4.5) as its always-available fallback. That pair is the whole protocol-level surface.
 
-- **Webhook** (default) — for agents reachable at a URL. Push hint; pull is the fallback.
-- **WebSocket** — for agents that hold a live connection (lower latency, no public URL needed).
-- **MCP server** — expose the mailbox as Model Context Protocol tools (`list_inbox`, `read`, `send`, `ack`, …). Agents that already speak MCP get the mailbox as native tools with no glue code. (AgentMail ships one; it's the most agent-ergonomic transport and a strong candidate for AMP.)
-
-All transports share the same store-is-the-queue, ack, idempotency, and trust rules — they differ only in how the "you have mail" hint arrives.
+How a specific agent prefers to *consume* the event — a held WebSocket, or the mailbox exposed as MCP tools — is an **application-layer binding, out of scope for v0.1**. Those can be specified later if a real need appears; they would reuse the same payload, ack, idempotency, and trust rules unchanged. The protocol does not depend on them.
 
 ## 5. Acknowledgement & state machine
 
@@ -279,7 +277,7 @@ This table is the build backlog: the spec is the target, and cf-mail grows into 
 
 AMP is not invented in a vacuum. What we looked at and what we took:
 
-- **[AgentMail](https://www.agentmail.to/)** (YC S25) — the closest prior art: API-first inboxes for agents, webhooks **and** websockets, threading/labels/search/drafts, an **MCP server**, auto DKIM/SPF/DMARC, webhook signing. Validates the category. We borrow its transport ideas (websocket, MCP — §4.6). We diverge on two things: AgentMail is a hosted SaaS, AMP/cf-mail is **self-hosted on your own Cloudflare** (data sovereignty); and AgentMail uses a *suppression list* (blocklist), whereas AMP makes **bounded correspondents / default-deny both directions** the defining property of an agent mailbox (§2.1) — a stronger posture for the single-purpose agent.
+- **[AgentMail](https://www.agentmail.to/)** (YC S25) — the closest prior art: API-first inboxes for agents, webhooks **and** websockets, threading/labels/search/drafts, an MCP server, auto DKIM/SPF/DMARC, webhook signing. Validates the category. Its WebSocket/MCP transports are noted as future application-layer bindings (§4.6), deliberately out of v0.1. We diverge on two things: AgentMail is a hosted SaaS, AMP/cf-mail is **self-hosted on your own Cloudflare** (data sovereignty); and AgentMail uses a *suppression list* (blocklist), whereas AMP makes **bounded correspondents / default-deny both directions** the defining property of an agent mailbox (§2.1) — a stronger posture for the single-purpose agent.
 - **The Lethal Trifecta** (Simon Willison, 2025) + **OWASP LLM Top 10** (prompt injection #1) + **EchoLeak / CVE-2025-32711** — the threat model §6 and §2.1 are built to counter; "allowlists, not blocklists" is taken directly from this body of work.
 - **[Standard Webhooks](https://www.standardwebhooks.com/)** — adopted wholesale for webhook signing (§4.2): id + timestamp + body HMAC, replay protection, off-the-shelf verifiers.
 - **Google A2A** (agent-to-agent) — adjacent, not overlapping: A2A is how agents talk to *each other*; AMP is how an agent talks to the *outside world* through email. Complementary.

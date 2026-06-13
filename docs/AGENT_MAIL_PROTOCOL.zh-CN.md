@@ -1,0 +1,284 @@
+# Agent Mail Protocol（AMP）智能体邮件协议
+
+**状态：** v0.1（定稿） · English: [AGENT_MAIL_PROTOCOL.md](AGENT_MAIL_PROTOCOL.md) · **底座：** Cloudflare（Email Routing + Workers + D1 + R2），参考实现见 [cf-mail](../README.md)
+
+> v0.1 敲定五项核心决策（§2.1 有界通信、§3 存储即队列 + ack、§6 信任边界、§7 关联、§10 最小权限令牌）。剩下的开放项（§12）只是实现细节，不再是设计岔路。
+
+AMP 是**邮件系统**与**拥有一个邮箱的自治智能体（agent）**之间的契约。它规定来信如何抵达 agent、agent 如何确认与处理、请求与回信如何关联，以及最重要的——如何把信任边界表达清楚，让 agent 能安全地消费不可信邮件。
+
+它是协议，不是产品。cf-mail 是其中一种实现；任何遵循 AMP 的系统都能托管 agent 邮箱。
+
+## 0. 为什么需要它
+
+邮件起初是人对人的，对程序而言它退化成了一个单向出口（发通知）。一旦你开始跑 agent，邮件就变成了另一种东西：**agent 与外部世界之间一个异步、持久、人人都能投递的缓冲池**。它是这世上唯一一个所有人、所有服务都已经在说的协议——所以一个有地址的 agent，不需要任何对接就能被任何人找到。
+
+但人能分辨「这封信在跟我说话」和「这封信在命令我」，agent 不能——除非协议把信任边界**摆到结构上**。这是 AMP 的核心职责。其余的，是队列机制。
+
+**非目标：** agent 之间的 RPC、实时/低延迟交换、顺序保证、替代真正的消息总线。AMP 是缓冲池，不是总线。
+
+## 1. 术语
+
+- **human 邮箱** — 人在 UI 里读。状态 = 已读/未读、归档、垃圾、草稿。操作靠手动。
+- **agent 邮箱** — agent 通过 webhook + API 消费。状态 = 任务生命周期（见下）。操作是程序化的。
+- **投递（Delivery）** — 给 agent 的一个「有新邮件」提示。
+- **确认（Ack）** — agent 声明它已消费（处理）某封信。
+- **关联（Correlation）** — 把一封回信对回到引发它的那封外发信。
+- **升级（Escalation）** — 把一封信从 agent 交给人。
+- **信任块（Trust block）** — 系统断言的元数据，供 agent 判断一封信的内容该信多少。
+
+## 2. 两类邮箱
+
+邮箱有一个 `kind`：`human`（默认）或 `agent`。这个类型从头到尾改变行为：
+
+| 维度 | `human` | `agent` |
+|---|---|---|
+| 谁在读 | 人，在 UI 里 | agent，通过 webhook/API |
+| **通信对象** | 谁都能发、谁都能收（过滤垃圾） | **双向有界：发件人和收件人都走白名单，默认拒收** |
+| 来信时 | 推人的设备、进人的收件箱 | 触发该邮箱的 webhook；**不**推设备、不混进人的收件箱 |
+| 状态模型 | 已读/未读 · 归档 · 垃圾 · 草稿 | `received → delivered → handled / failed`（任务队列视角，不是「读没读」） |
+| 操作 | 回复/转发/归档/删除/拉黑（手动） | 配 webhook · ack · 重投 · 升级（程序化） |
+| 通知 | 来信 → 通知人 | 来信 → webhook；只有失败/升级时才通知人 |
+| 令牌 | 完整 `mail:send` | 绑定到这一个邮箱（仅以本地址发信 + 仅读本邮箱） |
+
+存在网线上的邮件是一样的；是**目标邮箱的类型**决定了接下来发生什么。
+
+### 2.1 有界通信 —— 双向白名单（默认拒收）
+
+human 邮箱是个公共地址：谁都能发、谁都能收，事后过滤垃圾。**agent 邮箱恰恰相反，而且是双向的。** 一个专用 agent 存在的意义，是带着已知的、少数几个对象去做一件事——这个边界不是限制，而是要点本身。正是它让一个 agent 可信到能无人值守地运行。所以 agent 邮箱同时约束**谁能写给它**和**它能写给谁**，两者都由邮件系统强制、都默认拒收。
+
+**入站准入。** 一封信被接受，仅当发件人被许可；其余在**入库之前、收信那一刻**就被拒，违规邮件根本进不了队列、到不了 agent。发件人被许可，当且仅当满足其一：
+
+1. **静态白名单** — 在邮箱配置的允许集里：精确地址（`alice@example.com`）或整个域（`@partner.com`）。
+2. **动态准入（回信凭证）** — 是 agent 自己发出去那封的有效回信：带着 agent 铸的、仍在有效期的 `correlationId`（即 §7 的 `Reply-To` plus 地址），或其 `In-Reply-To`/`References` 命中已发件。发信这个动作会签发一张**限时、单对象**的凭证，让回信进得来，而不必永久放宽名单。
+
+被拒发件人收到 SMTP `550`（与 cf-mail 对未知地址的现有行为一致）；什么都不存。
+
+**出站管控。** agent 只能发给被许可的收件人——每个 `to`/`cc`/`bcc` 在信**离开之前**、于发送 API 处校验。收件人被许可，当且仅当满足其一：
+
+1. **静态白名单** — 在邮箱配置的外发允许集里（地址或域）。
+2. **动态准入（回信凭证）** — 这封是对某封入站邮件的回信（`inReplyToId`），且回给那封信的发件人。agent 永远能回复一个合法找到过它的人，哪怕对方不在静态名单里。
+
+发给任何不被许可的收件人，**整封被 API 拒发**（不会静默剔掉某个收件人）。
+
+**为什么出站管控和入站一样重要。** 入站管控把敌意内容挡在外面；出站管控则在「万一还是失守」时封住爆炸半径：即便一个 agent 的推理被注入内容完全劫持，它也**发不到、联系不上任意地址**——「把密钥发给 attacker@evil.com」会因为该收件人从未被加入白名单而失败。两者合起来是纵深防御：§6 让邮件**变不成**指令；§2.1 保证即便它变成了，agent 也只能触达它预定义的那个世界。
+
+**入站与出站白名单可以不同。** 一个监控类 agent 可能从很多 `service@…` 收信，却只向一个人汇报；这是两个不同的集合。当 agent 只跟单一对象往来时，它们合并成一条。
+
+新建的 agent 邮箱默认**两个方向都 deny-all**。配置失误是失败关闭，绝不敞开。所有这些是**协议级保证**，由邮件系统强制执行（入站在 SMTP 边界、出站在发送 API），绝不交给 agent 自己裁量。
+
+## 3. 核心模型：推送是提示，存储才是队列
+
+三层，永远不要混为一谈：
+
+1. **存储（D1）是持久队列，是真相之源。** 每封来信在任何后续动作之前先落库。
+2. **webhook 只是投递提示**（「有新东西了」）。它是 best-effort、**至少一次**。
+3. **ack 才是消费。** 一封信在 agent ack 之前一直处于打开状态。
+
+实现必须遵守的推论：
+
+- **按 `id` 幂等。** webhook 对同一封信可能触发不止一次（重试、竞态）。agent 必须按 `id` 去重。
+- **不保证顺序。** agent 不得假设邮件按发出/收到顺序到达。
+- **拉取永远可用。** webhook 丢了也不丢信——agent 能 `GET` 未处理的信补齐。webhook 是对轮询的优化，绝非唯一通路。
+
+## 4. 入站投递（邮件 → agent）
+
+### 4.1 webhook 载荷（schema v1）
+
+载荷把**系统断言的元数据**（`meta`，可信）与**发件人控制的内容**（`untrusted`，不可信）分开。这个分离是刻意做成结构性的——见 §6。
+
+```json
+{
+  "schemaVersion": 1,
+  "event": "mail.received",
+  "id": "9f2c…",
+  "mailbox": "claudecode",
+  "meta": {
+    "from": "alice@example.com",
+    "fromName": "Alice",
+    "to": "claudecode@xtxt.top",
+    "cc": "",
+    "receivedAt": "2026-06-13T15:40:00Z",
+    "messageId": "<…@example.com>",
+    "inReplyTo": "<…@xtxt.top>",
+    "correlationId": "task123",
+    "trust": {
+      "dkimPass": true,
+      "spfPass": true,
+      "knownContact": true,
+      "firstContact": false,
+      "isReplyToAgent": true
+    }
+  },
+  "untrusted": {
+    "subject": "Re: deploy approval",
+    "body": "go ahead",
+    "attachments": [
+      { "filename": "log.txt", "mimeType": "text/plain", "size": 1843, "key": "mail/9f2c…/1-log.txt" }
+    ]
+  }
+}
+```
+
+`untrusted.body` 是纯文本（HTML 已剥离）；需要全文/附件时 agent 再调 API 取。附件字节从不内联——`key` 经附件接口取。
+
+### 4.2 签名 —— 遵循 Standard Webhooks
+
+webhook 签名遵循 [Standard Webhooks](https://www.standardwebhooks.com/) 规范，而非自创方案，这样现成的验证库（JS/Python/Go/Rust…）即可使用，且天然防重放：
+
+```
+webhook-id:        <唯一消息 id>
+webhook-timestamp: <unix 秒>
+webhook-signature: v1,<base64 HMAC-SHA256( "{id}.{timestamp}.{rawBody}", secret )>
+```
+
+接收端必须：(a) 对**原始** body 验 HMAC；(b) 若 `webhook-timestamp` 超出容差窗口（如 ±5 分钟）则拒绝，以防重放；(c) 把 `webhook-id` 当幂等键（§3）。只签 body——cf-mail 现状（`X-CF-Mail-Signature: sha256=…`）——更弱（可重放、无 id）；迁移到 Standard Webhooks 见附录 B。
+
+### 4.3 投递语义
+
+至少一次、无序、按 `id` 幂等。webhook 处理要快、接受即返回 2xx；真正的活儿异步去做。
+
+### 4.4 重试、死信、升级
+
+- 非 2xx 或超时 → 退避重试，至多 `maxAttempts` 次。
+- 超过 `maxAttempts`，该信标为 `failed` 并**升级给人**（通知配置好的 human 邮箱/设备），让一个掉线的 agent 永远不会悄悄丢信。
+- 重试不阻塞入库，也不阻塞其他信。
+
+### 4.5 拉取 API（补齐 / 兜底）
+
+```
+GET /api/agent/<mailbox>/inbox?state=open&since=<cursor>
+```
+
+以同样的载荷形状返回未处理（未 ack）的信，带游标供增量轮询。这是 webhook 之下的安全网。
+
+### 4.6 传输层
+
+AMP 在协议层定义的是**事件及其语义**（`mail.received`、载荷、信任分离、幂等）。规范传输是**签名 webhook**（§4.2）+ 作为永远可用兜底的**拉取 API**（§4.5）。这一对就是协议层的全部表面。
+
+至于某个具体 agent 偏好怎么**消费**这个事件——保持一条 WebSocket 长连，或把邮箱暴露成 MCP 工具——属于**应用层绑定，不在 v0.1 范围内**。真有需要时再另行规定；它们会原样复用同一套载荷、ack、幂等和信任规则。协议不依赖它们。
+
+## 5. 确认与状态机
+
+```
+received ──webhook──▶ delivered ──ack──▶ handled
+   │                     │                  ├─ done（已处理）
+   │                     │                  ├─ escalated（转交给人）
+   │                     │                  └─ rejected（有意忽略）
+   │                     └─ 超时未 ack ──▶ 重投（有上限）─▶ failed
+   └─ webhook 失败 maxAttempts 次 ───────────────────────▶ failed ──▶ 升级
+```
+
+确认：
+
+```
+POST /api/agent/<mailbox>/ack
+{ "id": "9f2c…", "result": "done" | "escalated" | "rejected", "note": "…可选…" }
+```
+
+- 超时 `T` 仍未 ack 的信会被重投（有次数上限）；这正是 agent 必须幂等的原因。
+- agent 的状态与人的「已读/归档」**相互独立**，所以人和 agent 能共享同一份存储的可见性而互不踩踏。（对 `agent` 邮箱本身没有人类读者，但当邮件被升级进 human 邮箱时，这个分离就有意义。）
+
+## 6. 信任与安全（agent 专属的核心）
+
+**威胁模型：致命三件套（lethal trifecta）。** Simon Willison 在 2025 年 6 月提出：当三样东西同时存在时，agent 就可被攻破——*接触私有数据*、*暴露于不可信内容*、*能对外通信*。邮件一次性把三样都塞给 agent，这正是天真的「agent 邮箱」之所以危险——EchoLeak（CVE-2025-32711）就是一封邮件把微软 Copilot 一步步引导去外泄内部文件，零点击。AMP 的设计**从三条腿中砍掉两条**：§6 把不可信内容关进笼子、让它当不了指令，§2.1 的外发白名单封住对外通信、让被劫持的 agent 无处可发。（文献里的共识防御正是这个——**用 allowlist，不用 blocklist**，并约束外泄通道。）
+
+人读信时会自动施加判断。agent 会把读到的一切当作推理的输入——所以邮件正文按定义就是 **prompt injection 通道**。AMP 把这条边界做成结构性的，而非靠告诫：
+
+1. **`meta` 是系统断言的，可信**（谁/何时、DKIM/SPF 结果、是否已知联系人、关联）。它由邮件系统算出，不受发件人控制。
+2. **`untrusted` 是发件人控制的，是数据，永不为指令。** 主题、正文、附件都在这里。名字就是契约。
+3. **铁律：邮件内容绝不能触发高权操作。** 任何有后果的事（花钱、删除、代发、改配置）都要求一个带外授权——一个发件人白名单**加上**一个单独验证的信号——而不是邮件正文里的一句话。
+
+实现应在 `meta.trust` 里暴露的信任信号：
+
+- `dkimPass`、`spfPass` — 发件域是否通过认证。
+- `knownContact` — 发件人是否为已保存（未拉黑）的联系人。
+- `firstContact` — 该地址是否第一次写给这个邮箱。
+- `isReplyToAgent` — 是否为对 agent 自己发出的信的回复（高可信，因为线程由 agent 发起）。
+
+随着可信度下降，agent 应**降级处理**：来自已知联系人、DKIM 通过、且是对自己请求的回复，最可信；首次来信、DKIM 失败、未知发件人的，当纯不可信数据看，绝不当指令。
+
+## 7. 关联（请求 / 回信）
+
+为把一封回信对回引发它的请求，AMP 以 **`Reply-To` plus 地址**为主线：
+
+- agent 发信时**可**铸一个关联 id，并设 `Reply-To: <mailbox>+<corrId>@<domain>`。
+- 人或服务回信时自然回到那个地址。收信层把 plus 地址折回基础邮箱，解析出 `<corrId>`，作为 `meta.correlationId` 透出。
+
+之所以不用自定义头（人的客户端常把它丢掉），也不用裸 `References` 线索（转发/另起会断）：`Reply-To` 地址**穿透人这一环**，因为它*就是*回信要去的地方。
+
+即使没有 `correlationId`，当 `inReplyTo`/`references` 命中 agent 发过的信时，`meta.isReplyToAgent` 也会被置位。
+
+## 8. 出站（agent → 世界）
+
+```
+POST /api/agent/<mailbox>/send
+{ "to": "alice@example.com", "subject": "deploy approval",
+  "text": "回复 'go ahead' 即批准。", "correlationId": "task123",
+  "idempotencyKey": "send-task123-1", "attachments": [...] }
+```
+
+- `from` 固定为 agent 自己的邮箱；系统签 DKIM。
+- **每个收件人（`to`/`cc`/`bcc`）在信离开前对照外发白名单（§2.1）校验。** 有一个不被许可，整封拒发——这是 agent 有界通信保证的出站那一半。
+- `idempotencyKey` 去重重试，让一个不稳的 agent 永不重复发送。
+- `correlationId`（可选，默认开）按 §7 设置 `Reply-To` plus 地址。
+- 附件（合计 ≤5 MiB）兼作结构化数据通道——agent 可以附一份 JSON 文档来交换数据。
+
+## 9. 人 ↔ agent 交接
+
+两个方向都是一等公民：
+
+- **人 → agent（委派）：** 人把一封信转发到 agent 地址，就是「交给你办」。它作为普通入站到达；转发者的 `meta.knownContact` 为真。
+- **agent → 人（升级）：** agent 以 `result: "escalated"` 确认，把这封信连同 agent 的上下文备注重路由进配置好的 human 邮箱并通知人——「你的 agent 需要你」。
+
+## 10. 身份与权限
+
+一个 agent = 一个邮箱 = 一个 webhook + 一把**按地址绑定的令牌**。该令牌只能以自己的地址发信、只能读自己的邮箱——一把泄露的 agent 令牌读不到别的邮箱、不能以别的地址发信、也不能铸新令牌。最小权限是默认，不是选项。
+
+## 11. 版本
+
+每个载荷带 `schemaVersion`。同一大版本内**只做加法**演进；消费方忽略未知字段。邮件系统和 agent 各自独立迭代，所以网线格式必须能容忍双向的版本错位。
+
+## 12. 开放问题（v0.1）
+
+1. **未 ack 超时的重投** — 有上限的自动重投（要求 agent 幂等，AMP 本就强制）vs 仅靠拉取恢复。倾向自动重投。
+2. **信任粒度** — 暴露四个布尔让 agent 自己组合 vs 再预计算一个 `trustLevel: trusted|known|unknown`。倾向「两者都给：布尔 + 一个派生的便捷等级」。
+3. **升级路由** — 每个 agent 一个固定的 human 邮箱 vs 一套策略（不同任务类型走不同升级目标）。
+4. **拒收方式**（§2.1）— SMTP `550` 退信（信息明确，但暴露地址存在）vs 静默丢弃（更隐蔽，但合法却未列名的发件人得不到信号）。倾向 `550`（与 cf-mail 现状一致），按邮箱可选静默丢弃。
+5. **动态回信凭证的有效期与范围**（§2.1）— 一封外发把回信门开多久、一封外发只准被发对象回信还是同线程任何人都能回。倾向短有效期（天级）+ 单对象。
+
+**v0.1 已敲定**（确认）：§7 Reply-To plus 关联；§6 `meta`/`untrusted` 信任分离 + 「内容是数据、永不为指令」铁律；§3 推送提示 + 持久存储队列 + ack + agent 端幂等；§10 按地址最小权限令牌；**§2.1 agent 邮箱双向有界、默认拒收——发件人与收件人都走白名单**。
+
+## 附录 A — 典型流程
+
+**通知（发完即走）：** agent `send` → 完。不需要关联。
+
+**审批闭环（人在环上）：** agent 带 `correlationId` 和 `Reply-To: bot+task@` 发信 → 人回「go ahead」→ 入站 webhook 带 `meta.correlationId=task`、`meta.isReplyToAgent=true` → agent 匹配、执行、ack `done`。
+
+**入站服务事件：** 某服务把回执/告警发到 agent 地址 → webhook 带 `meta.knownContact`（若该服务已保存）→ agent 把 `untrusted.body` 当数据解析、绝不当命令 → ack `done`。
+
+## 附录 B — cf-mail 实现现状（v0.1）
+
+| AMP 特性 | cf-mail 现状 |
+|---|---|
+| 持久存储即队列（D1） | ✅ |
+| 入站 webhook + HMAC 签名 | ✅（全局 `AGENT_WEBHOOK_URL`）；⚠️ 自创的仅签 body——待迁移到 Standard Webhooks（§4.2） |
+| `meta`/`untrusted` 分离、`trust.{knownContact,dkimPass}` | ✅ 已在载荷中 |
+| 每邮箱 `kind: human \| agent` | ⛔ 规划中 |
+| 有界通信——入站**与**出站白名单 + 动态回信凭证、默认拒收 | ⛔ 规划中（现状：agent 邮箱像 human 一样收所有入站、能发往任意地址） |
+| 每邮箱 webhook + 按地址绑定令牌 | ⛔ 规划中（现状：一个全局 hook + `mail:send`） |
+| ack + 状态机（`delivered/handled/failed`） | ⛔ 规划中 |
+| 拉取 API（`/inbox?state=open`） | ⛔ 规划中（现状：`GET /api/mails`） |
+| 经 `Reply-To` plus 地址做关联 | ⚠️ 收信时已折叠 plus 地址；发信时铸 corrId 尚未接 |
+| 升级（`agent → 人`） | ⛔ 规划中 |
+
+这张表就是 build backlog：spec 是目标，cf-mail 一次一个加法地长成它。
+
+## 附录 C — 先行者与影响
+
+AMP 不是凭空造的。我们看了什么、取了什么：
+
+- **[AgentMail](https://www.agentmail.to/)**（YC S25）— 最接近的先行者：API 优先的 agent 信箱、webhook **加** websocket、threading/labels/search/drafts、MCP server、自动 DKIM/SPF/DMARC、webhook 签名。它证明了这个品类成立。它的 WebSocket/MCP 传输被我们记为未来的应用层绑定（§4.6），刻意排除在 v0.1 之外。我们在两点上分道：AgentMail 是托管 SaaS，AMP/cf-mail **自托管在你自己的 Cloudflare 上**（数据主权）；AgentMail 用 *suppression list*（黑名单），而 AMP 把**双向有界通信 / 默认拒收**做成 agent 邮箱的定义性属性（§2.1）——对专用 agent 是更硬的姿态。
+- **致命三件套**（Simon Willison, 2025）+ **OWASP LLM Top 10**（prompt injection 排第一）+ **EchoLeak / CVE-2025-32711** — §6 与 §2.1 要对付的威胁模型；「用 allowlist 不用 blocklist」直接取自这批工作。
+- **[Standard Webhooks](https://www.standardwebhooks.com/)** — webhook 签名整套照搬（§4.2）：id + 时间戳 + body 的 HMAC、防重放、现成验证库。
+- **Google A2A**（agent 对 agent）— 相邻而不重叠：A2A 是 agent 之间怎么对话，AMP 是 agent 经邮件怎么跟*外部世界*对话。互补。
+- **LangChain Agent Inbox** — 一种人审 agent 动作的 human-in-the-loop UX；启发了 AMP 的人↔agent 交接/升级（§9），不过 AMP 的「收件箱」是真邮件，不是动作队列。
