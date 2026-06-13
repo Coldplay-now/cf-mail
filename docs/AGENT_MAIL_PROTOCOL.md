@@ -8,6 +8,16 @@ AMP is the contract between a **mail system** and an **autonomous agent that own
 
 It is a protocol, not a product. cf-mail is one implementation; anything that speaks AMP can host agent mailboxes.
 
+## Design axioms
+
+Everything below derives from three axioms. They are not features; they are the first principles that make agent mail *different* from human mail. If a later rule ever contradicts one of these, the rule is wrong.
+
+- **A1 — A mailbox is a data buffer, not a command channel. Mail content is data, never a prompt.** An agent mailbox is an asynchronous, durable buffer between a human (or a service) and an agent — a place to *hold* a message, not a wire that *runs* it. Three actions are distinct and never collapse: **receive** (the system writes the message into the buffer — automatic), **read** (the agent pulls it out, with trust metadata attached — the agent's choice), and **act** (the agent decides what, if anything, to do — always a separate, governable judgement). The buffer is *never* auto-executed; receiving a mail is not the same as feeding it to a model, and feeding it to a model is not the same as obeying it. → §3 (store-as-queue), §5 (state machine), §6.
+- **A2 — Senders and recipients are explicit and bounded.** A purpose-built agent talks to a known, enumerable, auditable set of correspondents — in *both* directions. Who may write to it and who it may write to are both predefined and default-deny. The boundary is not a limitation; it is what makes the agent trustworthy enough to run unattended. → §2.1 (bounded correspondents), §8 (outbound), §10 (scoping).
+- **A3 — Mail is never, by itself, a command.** No property of a message — DKIM pass, a known sender, even "it looks like it's from the owner" — turns its content into an instruction. Trust signals decide *whether and how warily to read*, never *whether to obey*. Any consequential action requires an out-of-band authorization that does not live in the mail body. → §6 (iron rule), §11.2 (user rules).
+
+A1 says *what mail is*; A2 says *who it's between*; A3 says *what it may never become*. The rest of this document is mechanics in service of these three.
+
 ## 0. Why this exists
 
 Email used to be human-to-human, and for programs it degraded into a one-way exit (send a notification). Once you run agents, email becomes something else: an **asynchronous, durable, universally-addressable buffer** between an agent and the outside world. It is the only protocol every human and every service already speaks, so an agent with an address is reachable by anyone without per-counterparty integration.
@@ -44,6 +54,8 @@ The stored message is identical on the wire; the *kind of the destination mailbo
 
 ### 2.1 Bounded correspondents — allowlist both directions (default-deny)
 
+*(Derives from A2: senders and recipients are explicit and bounded, both directions, default-deny.)*
+
 A human mailbox is a public address: send to anyone, receive from anyone, filter spam afterwards. **An agent mailbox is the opposite, and in *both* directions.** A purpose-built agent exists to do one job with a known, small set of correspondents — and that boundary is not a limitation, it is the point. It is what makes the agent trustworthy enough to run unattended. So an agent mailbox constrains **who can write to it** and **who it can write to**, both enforced by the mail system, both default-deny.
 
 **Inbound admission.** A message is accepted only if the sender is permitted; everything else is rejected **at receive time, before storage**, so disallowed mail never enters the queue and never reaches the agent. The sender is admitted if **either**:
@@ -67,6 +79,8 @@ A send to any disallowed recipient is **refused by the API** (the whole send fai
 Default state of a fresh agent mailbox is **deny-all in both directions**. Misconfiguration fails closed, never open. All of this is a **protocol-level guarantee** enforced by the mail system (inbound at the SMTP boundary, outbound at the send API) — never delegated to the agent's own discretion.
 
 ## 3. Core model: push is a hint, the store is the queue
+
+*(Derives from A1: the mailbox is a buffer. Receiving writes to the store; it does not run anything.)*
 
 Three layers, never collapse them:
 
@@ -180,6 +194,8 @@ POST /api/agent/<mailbox>/ack
 
 ## 6. Trust & safety (the agent-specific core)
 
+*(Derives from A1 and A3: mail is buffered data and is never, by itself, a command. This section is where those two axioms become enforceable structure.)*
+
 **Threat model: the lethal trifecta.** Simon Willison's framing (June 2025) is that an agent is exploitable when three things coexist: *access to private data*, *exposure to untrusted content*, and *the ability to communicate externally*. Email hands an agent all three at once, which is exactly why naive "agent email" is dangerous — EchoLeak (CVE-2025-32711) was a single email that walked Microsoft Copilot into exfiltrating internal files, zero-click. AMP is designed to **break the trifecta on two of its three legs**: §6 fences untrusted content so it can't become instructions, and §2.1's outbound allowlist bounds external communication so a hijacked agent has nowhere to send. (The consensus defense in the literature is precisely this — *allowlists, not blocklists*, and constraining the exfiltration channel.)
 
 A human reading mail applies judgement automatically. An agent will treat whatever it reads as input to its reasoning — so mail body is a **prompt-injection vector** by definition. AMP makes the boundary structural rather than advisory:
@@ -187,6 +203,8 @@ A human reading mail applies judgement automatically. An agent will treat whatev
 1. **`meta` is system-asserted and trustworthy** (who/when, DKIM/SPF results, known-contact, correlation). It is computed by the mail system, not the sender.
 2. **`untrusted` is sender-controlled and is DATA, never instructions.** Subject, body, attachments live here. The name is the contract.
 3. **Iron rule: mail content MUST NOT be able to trigger a privileged action.** Anything consequential (spending, deleting, sending on the user's behalf, changing config) requires an out-of-band authorization — an allowlist of senders **plus** a separately verified signal — not merely a sentence in an email body.
+
+**Receive ≠ read ≠ act (the A1 separation).** These are three distinct steps and a safe implementation keeps them distinct: **receiving** writes the message to the buffer (automatic, no reasoning involved); **reading** is the agent choosing to pull a message in as input, carrying its `meta.trust` with it; **acting** is the agent deciding what — if anything — to do, and is *always* a separate judgement that user rules (§11.2) can gate. The buffer is never auto-executed: a message arriving does not feed a model, and a message read does not authorize an action. The trust signals below modulate *reading*; they never authorize *acting*.
 
 Trust signals an implementation SHOULD surface in `meta.trust`:
 
