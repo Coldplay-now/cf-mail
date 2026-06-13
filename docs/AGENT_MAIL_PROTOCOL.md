@@ -348,6 +348,8 @@ Every payload carries `schemaVersion`. Evolution is **additive only** within a m
 
 This table is the build backlog: the spec is the target, and cf-mail grows into it one additive change at a time.
 
+**Second implementation.** [xtblog](https://xtxt.top) (the author's site, same Cloudflare substrate but on Drizzle/D1) ships the **security-defining core** of v0.1 as of 2026-06: `kind:agent` mailboxes, bounded correspondents in both directions with dynamic reply-grants (default-deny, enforced at the SMTP boundary inbound and the send API outbound), per-mailbox address-scoped tokens, the full trust block persisted per message, the `received→delivered→handled/failed` ack state machine, a pull API, and an append-only event log with reason codes. It defers the same items cf-mail does (manifest, soft rules, escalation routing, Standard Webhooks signing) and, because Cloudflare's Email Service send binding exposes no `Reply-To`, uses reference-based correlation (§7) rather than plus-addressing. Two independent implementations converging on the same wire contract is the point of writing it as a protocol.
+
 ## Appendix C — prior art & influences
 
 AMP is not invented in a vacuum. What we looked at and what we took:
