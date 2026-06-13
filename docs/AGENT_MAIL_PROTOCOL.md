@@ -119,15 +119,17 @@ The payload separates **system-asserted metadata** (`meta`, trusted) from **send
 
 `untrusted.body` is plain text (HTML stripped); the agent fetches full content/attachments from the API when needed. Attachment bytes are never inlined — `key` is fetched via the attachments endpoint.
 
-### 4.2 Signature
+### 4.2 Signature — follow Standard Webhooks
 
-If a signing secret is configured, the request carries:
+Webhook signing follows the [Standard Webhooks](https://www.standardwebhooks.com/) spec rather than a bespoke scheme, so existing verifier libraries (JS/Python/Go/Rust/…) work out of the box and replay attacks are covered:
 
 ```
-X-CF-Mail-Signature: sha256=<hex HMAC-SHA256(rawBody, secret)>
+webhook-id:        <unique message id>
+webhook-timestamp: <unix seconds>
+webhook-signature: v1,<base64 HMAC-SHA256( "{id}.{timestamp}.{rawBody}", secret )>
 ```
 
-The receiver MUST verify against the **raw** body before parsing, and reject on mismatch.
+The receiver MUST: (a) verify the HMAC against the **raw** body, (b) reject if `webhook-timestamp` is outside a tolerance window (e.g. ±5 min) to stop replays, and (c) treat `webhook-id` as the idempotency key (§3). Signing only the body — as cf-mail does today (`X-CF-Mail-Signature: sha256=…`) — is weaker (replayable, no id); migrating to Standard Webhooks is tracked in Appendix B.
 
 ### 4.3 Delivery semantics
 
@@ -146,6 +148,16 @@ GET /api/agent/<mailbox>/inbox?state=open&since=<cursor>
 ```
 
 Returns open (unacked) messages in the same payload shape, with a cursor for incremental polling. This is the safety net under the webhook.
+
+### 4.6 Transports (webhook is one of several)
+
+The payload and semantics above are transport-independent. An implementation MAY offer the same `mail.received` event over additional channels, and SHOULD pick what fits the agent's runtime:
+
+- **Webhook** (default) — for agents reachable at a URL. Push hint; pull is the fallback.
+- **WebSocket** — for agents that hold a live connection (lower latency, no public URL needed).
+- **MCP server** — expose the mailbox as Model Context Protocol tools (`list_inbox`, `read`, `send`, `ack`, …). Agents that already speak MCP get the mailbox as native tools with no glue code. (AgentMail ships one; it's the most agent-ergonomic transport and a strong candidate for AMP.)
+
+All transports share the same store-is-the-queue, ack, idempotency, and trust rules — they differ only in how the "you have mail" hint arrives.
 
 ## 5. Acknowledgement & state machine
 
@@ -169,6 +181,8 @@ POST /api/agent/<mailbox>/ack
 - Agent state is **separate from human read/archived state**, so a human and an agent can share visibility of the same store without trampling each other. (For an `agent` mailbox there is no human reader, but the separation matters when mail is escalated into a human mailbox.)
 
 ## 6. Trust & safety (the agent-specific core)
+
+**Threat model: the lethal trifecta.** Simon Willison's framing (June 2025) is that an agent is exploitable when three things coexist: *access to private data*, *exposure to untrusted content*, and *the ability to communicate externally*. Email hands an agent all three at once, which is exactly why naive "agent email" is dangerous — EchoLeak (CVE-2025-32711) was a single email that walked Microsoft Copilot into exfiltrating internal files, zero-click. AMP is designed to **break the trifecta on two of its three legs**: §6 fences untrusted content so it can't become instructions, and §2.1's outbound allowlist bounds external communication so a hijacked agent has nowhere to send. (The consensus defense in the literature is precisely this — *allowlists, not blocklists*, and constraining the exfiltration channel.)
 
 A human reading mail applies judgement automatically. An agent will treat whatever it reads as input to its reasoning — so mail body is a **prompt-injection vector** by definition. AMP makes the boundary structural rather than advisory:
 
@@ -249,7 +263,7 @@ Every payload carries `schemaVersion`. Evolution is **additive only** within a m
 | AMP feature | cf-mail today |
 |---|---|
 | Persisted store as queue (D1) | ✅ |
-| Inbound webhook + HMAC signature | ✅ (global `AGENT_WEBHOOK_URL`) |
+| Inbound webhook + HMAC signature | ✅ (global `AGENT_WEBHOOK_URL`); ⚠️ bespoke body-only sig — migrate to Standard Webhooks (§4.2) |
 | `meta` / `untrusted` split, `trust.{knownContact,dkimPass}` | ✅ in payload |
 | `kind: human \| agent` per mailbox | ⛔ planned |
 | Bounded correspondents — inbound **and** outbound allowlist + dynamic reply-grants, default-deny | ⛔ planned (today agent boxes accept all inbound and can send anywhere) |
@@ -260,3 +274,13 @@ Every payload carries `schemaVersion`. Evolution is **additive only** within a m
 | Escalation (`agent → human`) | ⛔ planned |
 
 This table is the build backlog: the spec is the target, and cf-mail grows into it one additive change at a time.
+
+## Appendix C — prior art & influences
+
+AMP is not invented in a vacuum. What we looked at and what we took:
+
+- **[AgentMail](https://www.agentmail.to/)** (YC S25) — the closest prior art: API-first inboxes for agents, webhooks **and** websockets, threading/labels/search/drafts, an **MCP server**, auto DKIM/SPF/DMARC, webhook signing. Validates the category. We borrow its transport ideas (websocket, MCP — §4.6). We diverge on two things: AgentMail is a hosted SaaS, AMP/cf-mail is **self-hosted on your own Cloudflare** (data sovereignty); and AgentMail uses a *suppression list* (blocklist), whereas AMP makes **bounded correspondents / default-deny both directions** the defining property of an agent mailbox (§2.1) — a stronger posture for the single-purpose agent.
+- **The Lethal Trifecta** (Simon Willison, 2025) + **OWASP LLM Top 10** (prompt injection #1) + **EchoLeak / CVE-2025-32711** — the threat model §6 and §2.1 are built to counter; "allowlists, not blocklists" is taken directly from this body of work.
+- **[Standard Webhooks](https://www.standardwebhooks.com/)** — adopted wholesale for webhook signing (§4.2): id + timestamp + body HMAC, replay protection, off-the-shelf verifiers.
+- **Google A2A** (agent-to-agent) — adjacent, not overlapping: A2A is how agents talk to *each other*; AMP is how an agent talks to the *outside world* through email. Complementary.
+- **LangChain Agent Inbox** — a human-in-the-loop UX where a person approves agent actions; informs AMP's human↔agent handoff/escalation (§9), though AMP's "inbox" is real email, not an action queue.
