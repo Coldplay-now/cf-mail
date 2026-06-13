@@ -31,6 +31,7 @@ A mailbox has a `kind`: `human` (default) or `agent`. The kind changes behaviour
 | Dimension | `human` | `agent` |
 |---|---|---|
 | Reader | person, in a UI | agent, via webhook/API |
+| **Admission** | **accept anyone, filter spam after** | **default-deny: only configured/granted senders, reject the rest** |
 | On receive | push to the person's devices; show in the human inbox | fire the mailbox's webhook; do **not** push to devices or clutter the human inbox |
 | State model | read/unread · archived · spam · draft | `received → delivered → handled / failed` (a task queue, not "read") |
 | Operations | reply / forward / archive / delete / blocklist (manual) | configure webhook · ack · redeliver · escalate (programmatic) |
@@ -38,6 +39,21 @@ A mailbox has a `kind`: `human` (default) or `agent`. The kind changes behaviour
 | Token | full `mail:send` | scoped to this one mailbox (send-as + read-own only) |
 
 The stored message is identical on the wire; the *kind of the destination mailbox* decides what happens next.
+
+### 2.1 Admission control — agent mailboxes are allowlist-only (default-deny)
+
+A human mailbox is a public address: it accepts mail from anyone and filters spam afterwards. **An agent mailbox is the opposite — it is not a public inbox.** It accepts mail only from senders that are explicitly permitted; everything else is rejected **at receive time, before storage**, so disallowed mail never enters the queue and never reaches the agent. This is both an access-control and a prompt-injection guarantee: the agent can trust that anything it sees already passed the gate, because the *mail system* enforced it — not the agent.
+
+A sender is admitted if **either**:
+
+1. **Static allowlist** — the sender is on the mailbox's configured allow set. Entries may be an exact address (`alice@example.com`) or a whole domain (`@partner.com`).
+2. **Dynamic grant (reply capability)** — the message is a valid reply to an outbound the agent itself sent: it carries a `correlationId` the agent minted (via the `Reply-To` plus-address, §7) that is still live, or its `In-Reply-To`/`References` match a sent message. When the agent emails an outside party expecting an answer, that act issues a **time-boxed, single-correspondent grant** so the reply gets in — without permanently widening the allowlist. Grants expire (TTL) and SHOULD be scoped to the address they were issued to.
+
+Everything else is **rejected with SMTP `550`** (consistent with cf-mail's existing unknown-address behaviour), so the sending MTA is told it failed and nothing is stored. (A silent-drop variant is possible where stealth matters — see open questions.)
+
+Default state of a freshly created agent mailbox is **deny-all**: until you configure an allowlist or the agent initiates outbound, nothing is accepted. Misconfiguration fails closed, never open.
+
+This admission rule is a **protocol-level guarantee**, enforced by the mail system at the SMTP boundary. An agent MUST NOT be relied upon to filter its own senders — by the time mail reaches it, the filtering already happened.
 
 ## 3. Core model: push is a hint, the store is the queue
 
@@ -205,6 +221,10 @@ Every payload carries `schemaVersion`. Evolution is **additive only** within a m
 1. **Redelivery on unacked timeout** — bounded auto-redeliver (requires agent idempotency, which AMP already mandates) vs. pull-only recovery. Leaning auto-redeliver.
 2. **Trust granularity** — expose the four booleans and let the agent combine them, vs. also precomputing a single `trustLevel: trusted|known|unknown`. Leaning "both: booleans + a derived convenience level."
 3. **Escalation routing** — a single configured human mailbox per agent, vs. a policy (different escalation targets per task type).
+4. **Rejection mode for disallowed senders** (§2.1) — SMTP `550` bounce (informative, but confirms the address exists) vs. silent drop (stealthier, but a legit-unlisted sender gets no signal). Leaning `550` to match cf-mail's existing behaviour, with silent-drop as a per-mailbox option.
+5. **Dynamic reply-grant TTL & scope** (§2.1) — how long an outbound keeps the reply door open, and whether one outbound admits only the addressed recipient or anyone replying on that thread. Leaning short TTL (days) + single-correspondent.
+
+**Settled in v0.1** (confirmed): correlation via `Reply-To` plus-addressing (§7); the `meta`/`untrusted` trust split with the "content is data, never commands" rule (§6); push-hint + durable-store-queue + ack with agent-side idempotency (§3); per-agent address-scoped tokens (§10); **agent mailboxes are allowlist-only / default-deny (§2.1)**.
 
 ## Appendix A — canonical flows
 
@@ -222,6 +242,7 @@ Every payload carries `schemaVersion`. Evolution is **additive only** within a m
 | Inbound webhook + HMAC signature | ✅ (global `AGENT_WEBHOOK_URL`) |
 | `meta` / `untrusted` split, `trust.{knownContact,dkimPass}` | ✅ in payload |
 | `kind: human \| agent` per mailbox | ⛔ planned |
+| Admission control (allowlist + dynamic reply-grant, default-deny) | ⛔ planned (today agent boxes accept all like human boxes) |
 | Per-mailbox webhook + address-scoped token | ⛔ planned (currently one global hook + `mail:send`) |
 | Ack + state machine (`delivered/handled/failed`) | ⛔ planned |
 | Pull API (`/inbox?state=open`) | ⛔ planned (today: `GET /api/mails`) |
