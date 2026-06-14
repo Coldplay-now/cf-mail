@@ -105,15 +105,15 @@ The payload separates **system-asserted metadata** (`meta`, trusted) from **send
   "schemaVersion": 1,
   "event": "mail.received",
   "id": "9f2c…",
-  "mailbox": "claudecode",
+  "mailbox": "agent",
   "meta": {
     "from": "alice@example.com",
     "fromName": "Alice",
-    "to": "claudecode@xtxt.top",
+    "to": "agent@example.com",
     "cc": "",
     "receivedAt": "2026-06-13T15:40:00Z",
     "messageId": "<…@example.com>",
-    "inReplyTo": "<…@xtxt.top>",
+    "inReplyTo": "<…@example.com>",
     "correlationId": "task123",
     "trust": {
       "dkimPass": true,
@@ -265,10 +265,10 @@ The mailbox SHOULD expose a manifest the agent can read to understand its own bo
 ```
 GET /api/agent/<mailbox>/manifest
 {
-  "address": "claudecode@xtxt.top",
-  "purpose": "deploy approvals and status digests for XT",
+  "address": "agent@example.com",
+  "purpose": "deploy approvals and status digests for the owner",
   "operations": [ { "name": "send", "description": "…", "constraints": ["recipients allowlisted", "≤5MiB attachments"] }, … ],
-  "outboundAllowed": ["xt@xtxt.top"],          // or a redacted hint when the list is private
+  "outboundAllowed": ["owner@example.com"],          // or a redacted hint when the list is private
   "scopes": ["mail:send@self", "mail:read@self"],
   "rules": [ … see 11.2 … ],
   "limits": { "perMessageRecipients": 50, "monthlyQuota": 3000 }
