@@ -52,7 +52,7 @@
 - **收发双方明确且有界。** 一个专用 agent 只与一组已知、白名单内的对象往来——而且是**双向**、默认拒收。这个边界不是限制，而是让 agent 可信到能无人值守运行的前提。
 - **邮件本身永远不是命令。** 消息的任何属性——DKIM 通过、已知发件人、甚至"看起来像拥有者发的"——都不能把它的内容变成指令。信任信号决定**读得多警惕**，绝不决定**听不听**；任何有后果的动作都要一个不在邮件正文里的带外授权。
 
-**为什么重要。** 邮件一次性把**致命三件套**（Simon Willison：接触私有数据、暴露于不可信内容、能对外通信）全塞给 agent——这正是天真的"agent 邮箱"危险的原因（参见 EchoLeak / CVE-2025-32711：一封零点击邮件把微软 Copilot 引导去外泄内部文件）。cf-mail 从两条腿上砍断三件套：可信 `meta` / 不可信内容的分离，把内容关进笼子、让它当不了指令；出站白名单封住爆炸半径，即便 agent 被劫持，"把密钥发给 attacker@evil.com" 也会因为对方不在白名单而失败。背景阅读：**[致命的三要素](https://xtxt.top/articles/lethal-trifecta)**。
+**为什么重要。** 邮件一次性把**致命三件套**（Simon Willison：接触私有数据、暴露于不可信内容、能对外通信）全塞给 agent——这正是天真的"agent 邮箱"危险的原因（参见 EchoLeak / CVE-2025-32711：一封零点击邮件把微软 Copilot 引导去外泄内部文件）。cf-mail 从两条腿上砍断三件套：可信 `meta` / 不可信内容的分离，把内容关进笼子、让它当不了指令；出站白名单封住爆炸半径，即便 agent 被劫持，"把密钥发给 attacker@evil.com" 也会因为对方不在白名单而失败。背景阅读 —— **致命的三要素**：[中文](https://xtxt.top/articles/lethal-trifecta) · [English](https://xtxt.top/articles/lethal-trifecta-en)。
 
 **今天已交付：** 上面的 agent webhook（签名投递 + trust 块）。**完整协议**——`kind:agent` 邮箱、双向有界通信 + 动态回信凭证、`received → delivered → handled` ack 队列、按地址绑定的令牌、自描述 manifest、软/硬用户 rules、带 reason code 的事件日志可观测性——写在 **[AGENT_MAIL_PROTOCOL.zh-CN.md](docs/AGENT_MAIL_PROTOCOL.zh-CN.md)**，并已作为第二个实现跑在 [xtxt.top](https://xtxt.top) 上。
 
