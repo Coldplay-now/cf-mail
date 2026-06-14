@@ -42,6 +42,11 @@
 
   "observability": {
     "enabled": true
+  },
+
+  // Agent mail redelivery / dead-letter / log GC (src/cron.ts → scheduled()).
+  "triggers": {
+    "crons": ["*/5 * * * *"]
   }
 
   // Secrets (set with `wrangler secret put <NAME>`):

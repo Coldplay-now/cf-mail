@@ -77,14 +77,16 @@
           <h2>Addresses</h2>
           <p class="meta">Each row is a live mailbox: <code>local@<span class="domain"></span></code>. Unknown addresses are rejected at SMTP time.</p>
           <table class="table" id="addr-table">
-            <thead><tr><th>Address</th><th>Display name</th><th>Forward to</th><th>Active</th><th></th></tr></thead>
+            <thead><tr><th>Address</th><th>Kind</th><th>Display name</th><th>Forward to</th><th>Active</th><th></th></tr></thead>
             <tbody></tbody>
           </table>
           <div class="row">
             <input id="addr-new" placeholder="local part, e.g. hello">
             <input id="addr-name" placeholder="display name (optional)">
+            <label class="inline"><input id="addr-agent" type="checkbox"> agent mailbox</label>
             <button id="addr-add">Add address</button>
           </div>
+          <p class="meta">An <strong>agent</strong> mailbox is default-deny in both directions — add allowlist entries and mint a token from its <em>Agent</em> panel before it can receive or send.</p>
 
           <h2>Blocklist</h2>
           <p class="meta">Mail from blocked senders is stored as spam and never forwarded or notified.</p>
@@ -120,6 +122,48 @@
           <button id="c-send" class="primary">Send</button>
         </div>
         <p id="c-error" class="error"></p>
+      </div>
+    </div>
+
+    <!-- agent mailbox panel -->
+    <div id="agent-panel" class="modal hidden">
+      <div class="modal-card wide">
+        <div class="row between">
+          <h2>Agent · <code id="ag-addr"></code></h2>
+          <button id="ag-close">Close</button>
+        </div>
+
+        <h3>Purpose & delivery</h3>
+        <label>Purpose <input id="ag-purpose" placeholder="what this agent is for"></label>
+        <label>Webhook URL <input id="ag-webhook" placeholder="https://… (optional; pull API is the fallback)"></label>
+        <div class="row right"><button id="ag-save" class="primary">Save</button></div>
+
+        <h3>Allowlist <span class="meta">— default-deny; exact address or <code>@domain</code></span></h3>
+        <div class="cols">
+          <div>
+            <h4>Inbound (may send to this agent)</h4>
+            <ul id="ag-in" class="plain-list"></ul>
+            <div class="row"><input id="ag-in-new" placeholder="@example.com"><button data-dir="in" class="ag-allow-add">Add</button></div>
+          </div>
+          <div>
+            <h4>Outbound (this agent may send to)</h4>
+            <ul id="ag-out" class="plain-list"></ul>
+            <div class="row"><input id="ag-out-new" placeholder="you@example.com"><button data-dir="out" class="ag-allow-add">Add</button></div>
+          </div>
+        </div>
+
+        <h3>Token</h3>
+        <p class="meta">Mints a mailbox-scoped bearer token for <code>/api/agent/&lt;box&gt;/*</code>. Shown once — store it now.</p>
+        <div class="row"><button id="ag-token">Mint agent token</button> <code id="ag-token-out" class="token-out"></code></div>
+
+        <h3>Recent events</h3>
+        <div class="row"><button id="ag-events-refresh" class="small">Refresh</button> <span class="meta" id="ag-events-meta"></span></div>
+        <table class="table" id="ag-events"><thead><tr><th>When</th><th>Type</th><th>Reason</th><th>corrId</th></tr></thead><tbody></tbody></table>
+
+        <h3>Open inbox</h3>
+        <ul id="ag-inbox" class="plain-list"></ul>
+
+        <p id="ag-error" class="error"></p>
       </div>
     </div>
   </div>

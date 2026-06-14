@@ -75,6 +75,19 @@ input, select, textarea { font: inherit; padding: 7px 10px; border: 1px solid va
 .modal-card h2 { margin: 0 0 4px; font-size: 17px; }
 .modal-card label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
 
+/* agent panel */
+.modal-card.wide { width: min(820px, 96vw); }
+.modal-card h3 { margin: 16px 0 2px; font-size: 14px; }
+.modal-card h4 { margin: 8px 0 4px; font-size: 13px; color: var(--muted); font-weight: 600; }
+.badge.agent { background: var(--accent); color: #fff; opacity: 1; padding: 1px 7px; border-radius: 6px; }
+.row.between { justify-content: space-between; align-items: center; max-width: none; }
+.row-actions { display: flex; gap: 6px; }
+label.inline { display: inline-flex; flex-direction: row; align-items: center; gap: 6px; white-space: nowrap; }
+label.inline input { width: auto; }
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.token-out { word-break: break-all; color: var(--accent); }
+@media (max-width: 720px) { .cols { grid-template-columns: 1fr; } }
+
 @media (max-width: 720px) {
   .layout { grid-template-columns: 1fr; }
   .sidebar { flex-direction: row; align-items: center; border-right: 0; border-bottom: 1px solid var(--border); overflow-x: auto; }

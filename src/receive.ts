@@ -1,7 +1,7 @@
 import PostalMime from "postal-mime";
 import { type Env, snippetOf, threadKeyOf } from "./env";
 import { notifyDevices } from "./push";
-import { standardWebhookHeaders } from "./webhook";
+import { postSignedWebhook } from "./webhook";
 import {
   correlationFromLocalPart,
   deriveTrust,
@@ -238,10 +238,13 @@ async function receiveAgentMail(message: InboundEmailMessage, env: Env, ctx: Age
       attachments: attachments.length ? JSON.stringify(attachments) : null,
       created_at: new Date(now).toISOString()
     };
-    const delivered = await postAgentWebhook(env, box.agent_webhook_url, id, {
-      event: "mail.received",
-      ...payloadFromRow(row)
-    });
+    const delivered = await postSignedWebhook(
+      box.agent_webhook_url,
+      id,
+      { event: "mail.received", ...payloadFromRow(row) },
+      env.AGENT_WEBHOOK_SECRET,
+      Math.floor(now / 1000)
+    );
     await env.DB.prepare("UPDATE mails SET agent_state = ?, delivery_attempts = delivery_attempts + 1 WHERE id = ?")
       .bind(delivered ? "delivered" : "received", id)
       .run();
@@ -301,45 +304,25 @@ async function replyToAgent(
   return Boolean(hit);
 }
 
-// Per-mailbox agent webhook, signed per Standard Webhooks (id + timestamp + body
-// HMAC) so off-the-shelf verifiers work and replays are covered.
-async function postAgentWebhook(env: Env, url: string, id: string, payload: unknown): Promise<boolean> {
-  try {
-    const body = JSON.stringify(payload);
-    const headers: Record<string, string> = { "content-type": "application/json" };
-    if (env.AGENT_WEBHOOK_SECRET) {
-      Object.assign(headers, await standardWebhookHeaders(env.AGENT_WEBHOOK_SECRET, id, body, Math.floor(Date.now() / 1000)));
-    }
-    const res = await fetch(url, { method: "POST", headers, body });
-    return res.ok;
-  } catch (error) {
-    console.error("agent webhook delivery failed", error);
-    return false;
-  }
-}
-
 // Optional LEGACY global webhook for human mail: a generic "new mail" trigger
-// fired for every non-spam human message. Now signed per Standard Webhooks too.
-// Per-mailbox agent webhooks (above) are the recommended mechanism for agents.
+// fired for every non-spam human message, signed per Standard Webhooks.
+// Per-mailbox agent webhooks are the recommended mechanism for agents.
 async function notifyGlobalWebhook(env: Env, p: Record<string, unknown> & { authResults: string }) {
   if (!env.AGENT_WEBHOOK_URL) return;
-  try {
-    const from = p.from as { address: string };
-    const known = await env.DB.prepare("SELECT 1 FROM contacts WHERE address = ?").bind(from.address).first();
-    const { authResults, ...rest } = p;
-    const id = String(rest.id ?? crypto.randomUUID());
-    const body = JSON.stringify({
+  const from = p.from as { address: string };
+  const known = await env.DB.prepare("SELECT 1 FROM contacts WHERE address = ?").bind(from.address).first();
+  const { authResults, ...rest } = p;
+  const id = String(rest.id ?? crypto.randomUUID());
+  await postSignedWebhook(
+    env.AGENT_WEBHOOK_URL,
+    id,
+    {
       event: "mail.received",
       ...rest,
       receivedAt: new Date().toISOString(),
       trust: { knownContact: Boolean(known), dkimPass: /dkim=pass/i.test(authResults) }
-    });
-    const headers: Record<string, string> = { "content-type": "application/json" };
-    if (env.AGENT_WEBHOOK_SECRET) {
-      Object.assign(headers, await standardWebhookHeaders(env.AGENT_WEBHOOK_SECRET, id, body, Math.floor(Date.now() / 1000)));
-    }
-    await fetch(env.AGENT_WEBHOOK_URL, { method: "POST", headers, body });
-  } catch (error) {
-    console.error("global webhook failed", error);
-  }
+    },
+    env.AGENT_WEBHOOK_SECRET,
+    Math.floor(Date.now() / 1000)
+  );
 }

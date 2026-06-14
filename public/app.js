@@ -10,7 +10,8 @@ const state = {
   totalPages: 1,
   q: "",
   current: null, // open mail
-  replyTo: null
+  replyTo: null,
+  agent: null // open agent panel address
 };
 
 async function api(path, opts = {}) {
@@ -283,15 +284,21 @@ async function loadSettings() {
   tbody.innerHTML = "";
   for (const a of addresses) {
     const tr = document.createElement("tr");
+    const isAgent = a.kind === "agent";
     tr.innerHTML = `
       <td><code>${esc(a.address)}@${esc(state.domain)}</code></td>
+      <td>${isAgent ? '<span class="badge agent">agent</span>' : '<span class="badge">human</span>'}</td>
       <td>${esc(a.display_name || "")}</td>
       <td>${esc(a.forward_to || "")}</td>
       <td><input type="checkbox" ${a.active ? "checked" : ""}></td>
-      <td><button class="danger small">delete</button></td>`;
-    tr.querySelector("input").onchange = (e) =>
+      <td class="row-actions">
+        ${isAgent ? '<button class="small ag-open">Agent</button>' : ""}
+        <button class="danger small">delete</button>
+      </td>`;
+    tr.querySelector('input[type="checkbox"]').onchange = (e) =>
       api("/addresses/" + a.id, { method: "PATCH", body: JSON.stringify({ active: e.target.checked }) });
-    tr.querySelector("button").onclick = async () => {
+    if (isAgent) tr.querySelector(".ag-open").onclick = () => openAgentPanel(a);
+    tr.querySelector(".danger").onclick = async () => {
       if (!confirm(`Delete ${a.address}@${state.domain}? Incoming mail will be rejected.`)) return;
       await api("/addresses/" + a.id, { method: "DELETE" });
       loadSettings();
@@ -323,12 +330,120 @@ $("#addr-add").onclick = async () => {
   if (!address) return;
   await api("/addresses", {
     method: "POST",
-    body: JSON.stringify({ address, display_name: $("#addr-name").value.trim() || undefined })
+    body: JSON.stringify({
+      address,
+      display_name: $("#addr-name").value.trim() || undefined,
+      kind: $("#addr-agent").checked ? "agent" : "human"
+    })
   });
   $("#addr-new").value = "";
   $("#addr-name").value = "";
+  $("#addr-agent").checked = false;
   loadSettings();
 };
+
+// ---- agent panel ----
+async function openAgentPanel(addr) {
+  state.agent = addr;
+  $("#ag-addr").textContent = `${addr.address}@${state.domain}`;
+  $("#ag-purpose").value = addr.agent_purpose || "";
+  $("#ag-webhook").value = addr.agent_webhook_url || "";
+  $("#ag-token-out").textContent = "";
+  $("#ag-error").textContent = "";
+  await Promise.all([loadAllow(), loadAgentEvents(), loadAgentInbox()]);
+  $("#agent-panel").classList.remove("hidden");
+}
+$("#ag-close").onclick = () => $("#agent-panel").classList.add("hidden");
+
+$("#ag-save").onclick = async () => {
+  try {
+    await api("/addresses/" + state.agent.id, {
+      method: "PATCH",
+      body: JSON.stringify({
+        agent_purpose: $("#ag-purpose").value.trim() || null,
+        agent_webhook_url: $("#ag-webhook").value.trim() || null
+      })
+    });
+    state.agent.agent_purpose = $("#ag-purpose").value.trim();
+    state.agent.agent_webhook_url = $("#ag-webhook").value.trim();
+    $("#ag-error").textContent = "Saved.";
+  } catch (e) {
+    $("#ag-error").textContent = e.message;
+  }
+};
+
+async function loadAllow() {
+  const rows = await api("/addresses/" + state.agent.id + "/allow");
+  for (const dir of ["in", "out"]) {
+    const ul = $("#ag-" + dir);
+    const items = rows.filter((r) => r.direction === dir);
+    ul.innerHTML = items.length
+      ? items
+          .map((r) => `<li><code>${esc(r.pattern)}</code> <button class="small" data-id="${esc(r.id)}">remove</button></li>`)
+          .join("")
+      : "<li class='empty'>None — default-deny.</li>";
+    ul.querySelectorAll("button").forEach((b) => {
+      b.onclick = async () => {
+        await api("/addresses/" + state.agent.id + "/allow/" + b.dataset.id, { method: "DELETE" });
+        loadAllow();
+      };
+    });
+  }
+}
+document.querySelectorAll(".ag-allow-add").forEach((btn) => {
+  btn.onclick = async () => {
+    const dir = btn.dataset.dir;
+    const input = $("#ag-" + dir + "-new");
+    const pattern = input.value.trim();
+    if (!pattern) return;
+    try {
+      await api("/addresses/" + state.agent.id + "/allow", {
+        method: "POST",
+        body: JSON.stringify({ direction: dir, pattern })
+      });
+      input.value = "";
+      loadAllow();
+    } catch (e) {
+      $("#ag-error").textContent = e.message;
+    }
+  };
+});
+
+$("#ag-token").onclick = async () => {
+  if (!confirm("Mint a new agent token? Any previous token for this mailbox stops working.")) return;
+  const { token } = await api("/addresses/" + state.agent.id + "/agent-token", { method: "POST" });
+  $("#ag-token-out").textContent = token;
+};
+
+async function loadAgentEvents() {
+  const { items } = await api("/agent/" + state.agent.address + "/events?limit=30");
+  const tbody = $("#ag-events tbody");
+  tbody.innerHTML = items.length
+    ? items
+        .map(
+          (e) =>
+            `<tr><td class="date">${fmtDate(e.created_at)}</td><td><code>${esc(e.type)}</code></td>` +
+            `<td>${esc(e.reason || "")}</td><td>${esc(e.correlation_id || "")}</td></tr>`
+        )
+        .join("")
+    : "<tr><td colspan='4' class='empty'>No events yet.</td></tr>";
+  $("#ag-events-meta").textContent = `${items.length} shown`;
+}
+$("#ag-events-refresh").onclick = () => loadAgentEvents();
+
+async function loadAgentInbox() {
+  const { items } = await api("/agent/" + state.agent.address + "/inbox?state=open");
+  $("#ag-inbox").innerHTML = items.length
+    ? items
+        .map(
+          (m) =>
+            `<li><span class="badge">${esc(m.state)}</span> <code>${esc(m.meta.from)}</code> · ` +
+            `${esc(m.untrusted.subject || "(no subject)")} ` +
+            `<span class="meta">trust=${esc(m.meta.trust?.trustLevel || "?")}</span></li>`
+        )
+        .join("")
+    : "<li class='empty'>No open mail.</li>";
+}
 $("#block-add").onclick = async () => {
   const address = $("#block-new").value.trim();
   if (!address) return;

@@ -10,7 +10,7 @@ import { buildManifest, canAck, isAckResult } from "./agent";
 import { type AddressRow, getAddress, listAllow, logEvent, payloadFromRow } from "./agent-db";
 import { type MailRecord } from "./agent-db";
 import { SendError, parseSendRequest, sendMail } from "./send";
-import { notifyDevices } from "./push";
+import { escalateToHuman } from "./escalate";
 
 const PER_PAGE = 50;
 
@@ -124,16 +124,9 @@ export async function handleAgentApi(request: Request, env: Env): Promise<Respon
       detail: body.note ? { note: body.note } : undefined
     });
 
-    // Escalation re-surfaces the mail to the human owner (push notification).
+    // Escalation re-surfaces the mail to the human owner (inbox row + push).
     if (body.result === "escalated") {
-      await logEvent(env, { mailboxId: box.id, mailId: body.id, type: "escalated", correlationId: mail.correlation_id });
-      await notifyDevices(env, {
-        id: mail.id,
-        fromName: mail.from_name,
-        fromAddr: mail.from_addr,
-        subject: `[escalated] ${mail.subject ?? "(no subject)"}`,
-        snippet: body.note ?? mail.text_body
-      });
+      await escalateToHuman(env, { mailboxId: box.id, mail, note: body.note ?? null });
     }
     return json({ ok: true });
   }

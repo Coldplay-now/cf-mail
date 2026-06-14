@@ -2,6 +2,7 @@ import { type Env, authorized, json } from "./env";
 import { handleApi } from "./api";
 import { handleAgentApi } from "./agent-api";
 import { receiveEmail } from "./receive";
+import { runScheduled } from "./cron";
 
 // Baseline hardening for every response; CSP is added for HTML documents only
 // (the web app shell). The email-preview iframe is sandboxed separately, and
@@ -23,6 +24,11 @@ export default {
   // Inbound mail (Email Routing catch-all → this worker).
   async email(message: Parameters<typeof receiveEmail>[0], env: Env): Promise<void> {
     await receiveEmail(message, env);
+  },
+
+  // Cron (wrangler.jsonc triggers.crons): agent redelivery / dead-letter / GC.
+  async scheduled(_event: unknown, env: Env, ctx: { waitUntil(p: Promise<unknown>): void }): Promise<void> {
+    ctx.waitUntil(runScheduled(env));
   },
 
   // Web UI (static assets) + JSON API.

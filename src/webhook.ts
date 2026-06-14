@@ -42,3 +42,27 @@ export async function standardWebhookHeaders(
     "webhook-signature": `v1,${sig}`
   };
 }
+
+/**
+ * POST a JSON payload to a webhook, signed per Standard Webhooks when a secret
+ * is given. Best-effort: returns whether the receiver accepted it (2xx), never
+ * throws. Used for both per-mailbox agent delivery and the legacy global hook.
+ */
+export async function postSignedWebhook(
+  url: string,
+  id: string,
+  payload: unknown,
+  secret: string | undefined,
+  nowSeconds: number
+): Promise<boolean> {
+  try {
+    const body = JSON.stringify(payload);
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (secret) Object.assign(headers, await standardWebhookHeaders(secret, id, body, nowSeconds));
+    const res = await fetch(url, { method: "POST", headers, body });
+    return res.ok;
+  } catch (error) {
+    console.error("webhook delivery failed", url, error);
+    return false;
+  }
+}
