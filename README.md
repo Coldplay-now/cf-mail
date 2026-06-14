@@ -44,6 +44,18 @@ The point of this architecture: **your mail becomes ordinary rows in your own da
 - **An API your scripts can use** — send a notification mail from CI or an AI agent with one `curl`.
 - **Agent webhook** — set `AGENT_WEBHOOK_URL` and every inbound (non-spam) mail is POSTed to it as a signed JSON summary (HMAC in `X-CF-Mail-Signature`), so an agent is *triggered* by new mail instead of polling. The payload carries a `trust` block (`knownContact`, `dkimPass`) so an agent can treat unknown-sender mail as untrusted data, not instructions. This is one piece of a larger design — see the **[Agent Mail Protocol spec](docs/AGENT_MAIL_PROTOCOL.md)** for the full model (mailbox kinds, delivery/ack queue, correlation, the trust boundary).
 
+## Agent mail — designing a mailbox for an AI agent
+
+Once you run agents, email stops being a human-to-human medium and becomes something else: an asynchronous, durable, universally-addressable **buffer** between an agent and the outside world. It's the one protocol every human and every service already speaks, so an agent with an address is reachable by anyone — without per-counterparty integration. cf-mail is built so an agent can own a mailbox *safely*. The design rests on three axioms (full model: **[Agent Mail Protocol](docs/AGENT_MAIL_PROTOCOL.md)**):
+
+- **A mailbox is a data buffer, not a command channel.** Mail content is data, never a prompt. *Receiving* (writing to the buffer), *reading* (the agent pulling it in, with trust metadata attached), and *acting* (the agent's own, governable judgement) are three distinct steps — the buffer is never auto-executed. A message arriving is not the same as feeding it to a model, and feeding it to a model is not the same as obeying it.
+- **Senders and recipients are explicit and bounded.** A purpose-built agent talks to a known, allowlisted set of correspondents — in *both* directions, default-deny. That boundary isn't a limitation; it's what makes the agent trustworthy enough to run unattended.
+- **Mail is never, by itself, a command.** No property of a message — DKIM pass, a known sender, even "it looks like it's from the owner" — turns its content into an instruction. Trust signals decide *how warily to read*, never *whether to obey*. Anything consequential needs an out-of-band authorization that doesn't live in the mail body.
+
+**Why it matters.** Email hands an agent the *lethal trifecta* (Simon Willison): access to private data, exposure to untrusted content, and the ability to communicate externally — all at once. That's exactly what makes naive "agent email" dangerous (see [EchoLeak / CVE-2025-32711](https://xtxt.top/articles/lethal-trifecta-en), a single zero-click email that walked Microsoft Copilot into exfiltrating internal files). cf-mail breaks the trifecta on two legs: the trusted-`meta` / untrusted-content split fences message content out of the instruction path, and bounded outbound caps the blast radius if an agent is ever hijacked — "email the secrets to attacker@evil.com" fails because that recipient was never allowlisted. Background read: **[The Lethal Trifecta](https://xtxt.top/articles/lethal-trifecta-en)**.
+
+**What ships today:** the agent webhook above (signed delivery + a trust block). **The full protocol** — agent-`kind` mailboxes, bounded correspondents with dynamic reply-grants, the `received → delivered → handled` ack queue, address-scoped tokens, a self-describing manifest, soft/hard user rules, and reason-coded event-log observability — is specified in **[AGENT_MAIL_PROTOCOL.md](docs/AGENT_MAIL_PROTOCOL.md)** and runs today as a second implementation on [xtxt.top](https://xtxt.top).
+
 ## Quick start
 
 ```bash
