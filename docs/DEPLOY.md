@@ -131,17 +131,66 @@ POST /api/push   {"endpoint": "apns:<device-token-hex>", "label": "iPhone"}
 
 Endpoints answering `400`/`410` are pruned automatically.
 
-## 9. Operations
+## 9. Agent mailboxes
+
+An agent mailbox (`kind='agent'`) is a bounded, observable inbox for an autonomous agent — **default-deny in both directions**, kept out of the human folders, consumed over a mailbox-scoped token. Full model: [AGENT_MAIL_PROTOCOL.md](AGENT_MAIL_PROTOCOL.md).
+
+**Already running an older deploy?** Apply the migration once (fresh installs get this from `schema.sql`):
+
+```bash
+npx wrangler d1 execute cf-mail --remote --file=migrations/0001_agent_mailbox.sql
+```
+
+Then set up an agent mailbox (the global `AUTH_TOKEN` authorizes these admin calls):
+
+```bash
+BASE=https://mail.yourdomain.com; H="Authorization: Bearer $AUTH_TOKEN"
+
+# 1. create the agent mailbox
+curl -X POST $BASE/api/addresses -H "$H" -H 'content-type: application/json' \
+  -d '{"address":"agent","kind":"agent","agent_purpose":"my assistant",
+       "agent_webhook_url":"https://my-agent.example.com/hook"}'   # webhook optional
+
+# 2. allowlist correspondents — DEFAULT-DENY until you do (id = addresses.id)
+curl -X POST $BASE/api/addresses/<id>/allow -H "$H" -H 'content-type: application/json' \
+  -d '{"direction":"in","pattern":"@yourcompany.com"}'
+curl -X POST $BASE/api/addresses/<id>/allow -H "$H" -H 'content-type: application/json' \
+  -d '{"direction":"out","pattern":"you@yourcompany.com"}'
+
+# 3. mint the mailbox-scoped agent token (printed ONCE, stored hashed)
+curl -X POST $BASE/api/addresses/<id>/agent-token -H "$H"     # → {"token":"cfmail_…"}
+```
+
+The agent then uses *its* token (not the global one):
+
+```bash
+AH="Authorization: Bearer cfmail_…"
+curl $BASE/api/agent/agent/manifest -H "$AH"            # self-describing surface
+curl "$BASE/api/agent/agent/inbox?state=open" -H "$AH"  # pull unhandled mail
+curl -X POST $BASE/api/agent/agent/ack  -H "$AH" -d '{"id":"…","result":"done"}'
+curl -X POST $BASE/api/agent/agent/send -H "$AH" -d '{"to":"you@yourcompany.com","subject":"…","text":"…"}'
+curl "$BASE/api/agent/agent/events" -H "$AH"            # reason-coded trace log
+```
+
+Notes:
+- A send to a non-allowlisted recipient is refused (`403`) *before* mail leaves; an agent send mints a 7-day reply-grant so the reply is admitted.
+- `AGENT_WEBHOOK_SECRET` (a `wrangler secret`) signs per-mailbox webhook deliveries per [Standard Webhooks](https://www.standardwebhooks.com). Without it, deliveries are unsigned — set it in production.
+- Agent mail never pushes to your devices and never appears in the inbox/sent folders; observe it via `events` (and `ack {result:"escalated"}` re-surfaces a message to you with a push).
+
+## 10. Operations
 
 | Task | How |
 |---|---|
 | Rotate the admin token | `openssl rand -hex 32 \| npx wrangler secret put AUTH_TOKEN` (sessions sign in again) |
 | Logs / errors | Dashboard → Workers → cf-mail → **Logs** (observability is enabled in `wrangler.jsonc`) |
 | Backup | D1 has 30-day point-in-time recovery (`wrangler d1 time-travel`); for cold copies, `wrangler d1 export cf-mail --remote --output backup.sql` on a schedule |
-| Update cf-mail | `git pull && npm install && npm run deploy` (schema changes ship as new `.sql` files — apply before deploying) |
+| Update cf-mail | `git pull && npm install && npm run deploy` — apply any new `migrations/*.sql` (or `schema.sql` on a fresh DB) **before** deploying |
+| Rate-limit login/API | The Bearer token is the only gate. Add a Cloudflare **Rate Limiting** rule on `/api/*` (e.g. >20 req / 10s per IP → block) so a leaked-token guesser or scraper is throttled at the edge |
 | Uninstall | Disable the catch-all rule first (mail starts bouncing), then delete the worker; D1/R2 keep your archive until you delete them |
 
-## 10. Troubleshooting
+> Security headers (CSP, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `X-Frame-Options`) are set by the worker on every response; the email-preview iframe is `sandbox`ed (no scripts, no same-origin). No extra config needed.
+
+## 11. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -154,3 +203,6 @@ Endpoints answering `400`/`410` are pruned automatically.
 | Push silent on iOS Safari | Web Push needs the Home-Screen PWA context | Add to Home Screen, subscribe from there |
 | APNs `403 InvalidProviderToken` | Using an App Store Connect key | Create a dedicated APNs key |
 | Inbound mail delayed after a bad deploy | Worker threw; sender MTAs are retrying per SMTP | Fix the worker; queued mail arrives on the next retry |
+| Agent mail bounces / inbox stays empty | Sender not on the agent's inbound allowlist (default-deny) | Add a `direction:"in"` allow pattern; check `events` for `rejected/not_allowlisted` |
+| Agent `send` → 403 | Recipient not on the outbound allowlist and not a reply target | Add a `direction:"out"` allow pattern |
+| Agent endpoints → 401 | Wrong token, or `no such column: kind` after upgrade | Use the mailbox token from `agent-token`; apply `migrations/0001_agent_mailbox.sql` |

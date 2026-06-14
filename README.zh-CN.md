@@ -42,7 +42,7 @@
 - **双通道推送**——浏览器/PWA 走 Web Push（VAPID）；自己的 iOS 客户端走 APNs，且是 **Worker 直连**——Workers 的出站 `fetch` 能协商 APNs 要求的 HTTP/2，生产环境实证可行，不需要任何中转。
 - **诚实的失败语义**——收信过程中 Worker 抛异常时，发件方邮件服务器按 SMTP 规范自动重试。邮件只会延迟，不会丢。
 - **脚本友好的 API**——CI 或 AI Agent 一条 `curl` 就能发通知邮件。
-- **Agent 邮件协议**——见 [Agent Mail Protocol（AMP）规范](docs/AGENT_MAIL_PROTOCOL.zh-CN.md)：把「给 agent 的邮箱」沉淀成协议（两类邮箱、双向有界通信、信任边界、来信即触发的投递队列）。
+- **Agent 邮箱**——`kind='agent'` 的邮箱是给自治 agent 的一个有界、可观测的收件箱：双向默认拒绝、按地址绑定的令牌、`received → delivered → handled` 的 ack 队列、逐封信的 trust 块、带 reason code 的事件日志——通过 `GET/POST /api/agent/<box>/{manifest,inbox,ack,send,events}` 消费。新信投递到每邮箱 webhook（按 [Standard Webhooks](https://www.standardwebhooks.com) 签名），拉取 API 作兜底。见下方 **[Agent mail](#agent-mail--给-ai-agent-设计一个邮箱)** 与 **[协议规范](docs/AGENT_MAIL_PROTOCOL.zh-CN.md)**。（也提供更简单的全局 webhook `AGENT_WEBHOOK_URL`，对每封人类邮件触发。）
 
 ## Agent mail —— 给 AI agent 设计一个邮箱
 
@@ -54,7 +54,17 @@
 
 **为什么重要。** 邮件一次性把**致命三件套**（Simon Willison：接触私有数据、暴露于不可信内容、能对外通信）全塞给 agent——这正是天真的"agent 邮箱"危险的原因（参见 EchoLeak / CVE-2025-32711：一封零点击邮件把微软 Copilot 引导去外泄内部文件）。cf-mail 从两条腿上砍断三件套：可信 `meta` / 不可信内容的分离，把内容关进笼子、让它当不了指令；出站白名单封住爆炸半径，即便 agent 被劫持，"把密钥发给 attacker@evil.com" 也会因为对方不在白名单而失败。背景阅读 —— **致命的三要素**：[中文](https://xtxt.top/articles/lethal-trifecta) · [English](https://xtxt.top/articles/lethal-trifecta-en)。
 
-**今天已交付：** 上面的 agent webhook（签名投递 + trust 块）。**完整协议**——`kind:agent` 邮箱、双向有界通信 + 动态回信凭证、`received → delivered → handled` ack 队列、按地址绑定的令牌、自描述 manifest、软/硬用户 rules、带 reason code 的事件日志可观测性——写在 **[AGENT_MAIL_PROTOCOL.zh-CN.md](docs/AGENT_MAIL_PROTOCOL.zh-CN.md)**，并已作为第二个实现跑在 [xtxt.top](https://xtxt.top) 上。
+**今天已交付：** 安全内核已在本仓库实现。`kind='agent'` 的邮箱**双向默认拒绝**——新建的 agent 邮箱在你加白名单（`mail_allow`：精确地址或 `@domain`）之前，既不收也不发。入站在 SMTP 阶段就拦（存储前 `550`）；出站在公共发信路径里、**在 Email Service 绑定触发之前**就拒绝，所以"把密钥发给 attacker@evil.com"根本出不去。agent 每次发信会铸造一个限时**回信凭证**，让对方的回信被放行而不必永久放宽白名单。每封被放行的信都带一个 **trust 块**（§6：`dkimPass`/`spfPass`/`knownContact`/`allowlisted`/`firstContact`/`isReplyToAgent` → `trustLevel`），以 `agent_state`（`received → delivered → handled`）缓冲、不进任何人类文件夹、不触发设备推送，每个关键步骤都写入带 reason code 的**事件日志**。agent 通过**按地址绑定的令牌**（`POST /addresses/:id/agent-token`，只显示一次、哈希存储）消费：
+
+| 端点 | 作用 |
+|---|---|
+| `GET /api/agent/<box>/manifest` | 自描述工具面 + 白名单（§11.1） |
+| `GET /api/agent/<box>/inbox?state=open` | 拉取未处理邮件，`meta`/`untrusted` 形状（§4.1） |
+| `POST /api/agent/<box>/ack` | `{id, result: done\|escalated\|rejected}`，`escalated` 会回升给人 |
+| `POST /api/agent/<box>/send` | 以本邮箱发信（白名单强制、幂等） |
+| `GET /api/agent/<box>/events` | 带 reason code 的追踪日志，可按 `correlationId` 过滤 |
+
+每邮箱 webhook 投递（`addresses.agent_webhook_url`）按 **[Standard Webhooks](https://www.standardwebhooks.com)** 签名（`webhook-id`/`webhook-timestamp`/`webhook-signature`）——它只是"有新信了"的提示，拉取 API 才是始终可用的兜底。纯决策函数（`matchAllow`/`inboundAdmit`/`outboundAllowed`/`deriveTrust`）放在 [`src/agent.ts`](src/agent.ts)，无数据库即可单测。**仍延后**（见 [AGENT_MAIL_PROTOCOL.zh-CN.md](docs/AGENT_MAIL_PROTOCOL.zh-CN.md)）：软/硬用户 rules、升级路由配置、以及 §7 的 `Reply-To` 加号寻址关联（Email Service 发信绑定不暴露 `Reply-To`、也不返回 `Message-ID`，关联只能基于凭证/引用）。该协议也作为第二个实现跑在 [xtxt.top](https://xtxt.top) 上。配置步骤：**[docs/DEPLOY.md → Agent mailboxes](docs/DEPLOY.md#agent-mailboxes)**。
 
 ## 快速开始
 
@@ -87,6 +97,11 @@ npm run deploy
 | `GET/POST /api/addresses`、`PATCH/DELETE /api/addresses/:id` | 邮箱地址 CRUD |
 | `GET/POST /api/contacts`、`DELETE /api/contacts/:address` | 联系人 + 黑名单 |
 | `GET /api/push/key`、`POST/DELETE /api/push` | 推送订阅 |
+| `GET/POST /api/addresses/:id/allow`、`DELETE …/allow/:allowId` | agent 收/发白名单 |
+| `POST /api/addresses/:id/agent-token` | 铸造按邮箱绑定的 agent 令牌（只显示一次） |
+| `GET/POST /api/agent/<box>/{manifest,inbox,ack,send,events}` | agent 面（按邮箱令牌） |
+
+`/api/agent/*` 用**按邮箱**令牌鉴权（或用全局令牌作管理员覆盖）；其余端点用全局 `AUTH_TOKEN`。完整配置见 **[docs/DEPLOY.md → Agent mailboxes](docs/DEPLOY.md#agent-mailboxes)**。**全局 webhook**（可选，仅人类邮件）：设置 `AGENT_WEBHOOK_URL`（+ `AGENT_WEBHOOK_SECRET`），每封入站人类邮件按 **Standard Webhooks** 签名后 POST 给你；agent 邮箱用各自的每邮箱 webhook。
 
 ```bash
 curl -X POST https://mail.yourdomain.com/api/send \

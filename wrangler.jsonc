@@ -53,4 +53,8 @@
   //   APNS_TOPIC          optional — app bundle id
   //   APNS_KEY_ID         optional
   //   APNS_PRIVATE_KEY    optional — .p8 PEM contents
+  //   AGENT_WEBHOOK_SECRET optional — HMAC key; signs agent + global webhook
+  //                                   deliveries (Standard Webhooks)
+  //   AGENT_WEBHOOK_URL    optional — legacy global "new human mail" webhook
+  //                                   (agent mailboxes use their own per-box URL)
 }

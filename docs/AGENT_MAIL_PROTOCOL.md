@@ -145,7 +145,7 @@ webhook-timestamp: <unix seconds>
 webhook-signature: v1,<base64 HMAC-SHA256( "{id}.{timestamp}.{rawBody}", secret )>
 ```
 
-The receiver MUST: (a) verify the HMAC against the **raw** body, (b) reject if `webhook-timestamp` is outside a tolerance window (e.g. ±5 min) to stop replays, and (c) treat `webhook-id` as the idempotency key (§3). Signing only the body — as cf-mail does today (`X-CF-Mail-Signature: sha256=…`) — is weaker (replayable, no id); migrating to Standard Webhooks is tracked in Appendix B.
+The receiver MUST: (a) verify the HMAC against the **raw** body, (b) reject if `webhook-timestamp` is outside a tolerance window (e.g. ±5 min) to stop replays, and (c) treat `webhook-id` as the idempotency key (§3). cf-mail signs both its per-mailbox and legacy global webhooks this way (`AGENT_WEBHOOK_SECRET`).
 
 ### 4.3 Delivery semantics
 
@@ -333,20 +333,21 @@ Every payload carries `schemaVersion`. Evolution is **additive only** within a m
 | AMP feature | cf-mail today |
 |---|---|
 | Persisted store as queue (D1) | ✅ |
-| Inbound webhook + HMAC signature | ✅ (global `AGENT_WEBHOOK_URL`); ⚠️ bespoke body-only sig — migrate to Standard Webhooks (§4.2) |
-| `meta` / `untrusted` split, `trust.{knownContact,dkimPass}` | ✅ in payload |
-| `kind: human \| agent` per mailbox | ⛔ planned |
-| Bounded correspondents — inbound **and** outbound allowlist + dynamic reply-grants, default-deny | ⛔ planned (today agent boxes accept all inbound and can send anywhere) |
-| Per-mailbox webhook + address-scoped token | ⛔ planned (currently one global hook + `mail:send`) |
-| Ack + state machine (`delivered/handled/failed`) | ⛔ planned |
-| Pull API (`/inbox?state=open`) | ⛔ planned (today: `GET /api/mails`) |
-| Correlation via `Reply-To` plus-addressing | ⚠️ plus-addressing folds on receive; corrId minting on send not yet wired |
-| Escalation (`agent → human`) | ⛔ planned |
-| Self-describing manifest (§11.1) | ⛔ planned |
-| User rules — hard (enforced) + soft (declared) (§11.2) | ⚠️ hard rules exist as blocklist/scopes; unified policy + soft rules planned |
-| Agent observability — event log + reason codes (§11.3) | ⚠️ Workers Logs only; structured per-mailbox event log planned |
+| `meta` / `untrusted` split, full `trust` block (§6) persisted per message | ✅ |
+| `kind: human \| agent` per mailbox | ✅ |
+| Bounded correspondents — inbound **and** outbound allowlist + dynamic reply-grants, default-deny | ✅ (inbound enforced at SMTP `550`; outbound refused before the send binding fires) |
+| Per-mailbox webhook + address-scoped token | ✅ (`addresses.agent_webhook_url`; `agent-token` shown once, stored hashed) |
+| Webhook signature | ✅ Standard Webhooks (`webhook-id`/`webhook-timestamp`/`webhook-signature`) on both the per-mailbox and the legacy global hook |
+| Ack + state machine (`received → delivered → handled/failed`) | ✅ |
+| Pull API (`/api/agent/<box>/inbox?state=open`) | ✅ |
+| Self-describing manifest (§11.1) | ✅ (`/api/agent/<box>/manifest`) |
+| Escalation (`agent → human`) | ✅ (`ack {result:"escalated"}` → device push; structured routing config deferred) |
+| Agent observability — event log + reason codes (§11.3) | ✅ (`mail_event` + `/api/agent/<box>/events`) |
+| User rules — hard (enforced) + soft (declared) (§11.2) | ⚠️ hard rules = the allowlist/scopes; declared soft rules deferred |
+| Correlation via `Reply-To` plus-addressing (§7) | ⚠️ plus-addr corrId folds on receive; reply-grants + reference matching admit replies. Blocked: the send binding exposes no `Reply-To` / `Message-ID` |
+| Cron redelivery + dead-letter sweep (§4.4) | ⛔ deferred (the pull API is the fallback) |
 
-This table is the build backlog: the spec is the target, and cf-mail grows into it one additive change at a time.
+The security core (§2.1 / §3 / §6 / §10) ships in this repo; the remaining ⚠️/⛔ rows are additive and don't change the wire contract. The pure decision functions live in [`src/agent.ts`](../src/agent.ts) and are unit-tested ([`test/agent.test.ts`](../test/agent.test.ts)).
 
 **Second implementation.** [xtblog](https://xtxt.top) (the author's site, same Cloudflare substrate but on Drizzle/D1) implements nearly the whole protocol as of 2026-06. The v0.1 core: `kind:agent` mailboxes, bounded correspondents in both directions with dynamic reply-grants (default-deny, enforced at the SMTP boundary inbound and the send API outbound), per-mailbox address-scoped tokens, the full trust block persisted per message, the `received→delivered→handled/failed` ack state machine, a pull API, and an append-only event log with reason codes. Then v0.2 added the tool layer and hardening: the self-describing manifest (§11.1), hard+soft user rules (§11.2), human-mailbox escalation routing (§9), `trustLevel` (§13.2), per-mailbox reject mode (§13.4), a cron-driven redelivery + dead-letter sweep (§4.4), and Standard Webhooks signing (§4.2). The **one part it cannot do** is §7 `Reply-To` plus-addressing: Cloudflare's Email Service send binding exposes no `Reply-To` and returns no `Message-ID`, so correlation stays reference/grant-based until raw-MIME sending is viable. Two independent implementations converging on the same wire contract is the point of writing it as a protocol.
 

@@ -42,10 +42,13 @@ export interface Env {
   APNS_KEY_ID?: string;
   APNS_PRIVATE_KEY?: string; // .p8 PEM contents
 
-  // Optional: agent webhook — POST a signed JSON summary of each inbound
-  // (non-spam) mail so an agent is triggered by new mail instead of polling.
+  // Optional: legacy global webhook — POST a JSON summary of each inbound HUMAN
+  // mail so a generic listener is triggered instead of polling. Agent mailboxes
+  // use their own per-mailbox webhook (addresses.agent_webhook_url) instead.
   AGENT_WEBHOOK_URL?: string;
-  AGENT_WEBHOOK_SECRET?: string; // HMAC-SHA256 key; signature in X-CF-Mail-Signature
+  // HMAC-SHA256 key. Signs BOTH webhook paths per Standard Webhooks
+  // (webhook-id / webhook-timestamp / webhook-signature).
+  AGENT_WEBHOOK_SECRET?: string;
 }
 
 export const json = (data: unknown, status = 200) =>

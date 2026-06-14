@@ -1,11 +1,12 @@
-import { type Env, json, snippetOf, threadKeyOf } from "./env";
+import { type Env, json } from "./env";
+import { SendError, parseSendRequest, sendMail } from "./send";
+import { sha256Hex } from "./webhook";
 
-// REST API under /api/*. Everything requires `Authorization: Bearer <AUTH_TOKEN>`.
+// Operator REST API under /api/*. Everything requires `Authorization: Bearer
+// <AUTH_TOKEN>` (the global token). The agent-facing surface is separate
+// (/api/agent/*, per-mailbox token) and lives in agent-api.ts.
 
 const PER_PAGE = 20;
-
-const escapeHtml = (s: string) =>
-  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 type MailRow = Record<string, unknown> & {
   id: string;
@@ -16,6 +17,7 @@ type MailRow = Record<string, unknown> & {
 };
 
 async function counts(env: Env) {
+  // agent_state IS NULL keeps agent mail out of every human folder/count.
   const row = await env.DB.prepare(
     `SELECT
        SUM(CASE WHEN direction='in' AND archived=0 AND spam=0 THEN 1 ELSE 0 END) AS inbox,
@@ -23,7 +25,7 @@ async function counts(env: Env) {
        SUM(CASE WHEN direction='out' AND status='sent' THEN 1 ELSE 0 END) AS sent,
        SUM(CASE WHEN archived=1 THEN 1 ELSE 0 END) AS archived,
        SUM(CASE WHEN spam=1 THEN 1 ELSE 0 END) AS spam
-     FROM mails`
+     FROM mails WHERE agent_state IS NULL`
   ).first();
   return {
     inbox: Number(row?.inbox ?? 0),
@@ -35,15 +37,16 @@ async function counts(env: Env) {
 }
 
 function folderWhere(folder: string): string {
+  // Every human folder is scoped to agent_state IS NULL (agent mail is hidden).
   switch (folder) {
     case "sent":
-      return "direction='out' AND status='sent'";
+      return "agent_state IS NULL AND direction='out' AND status='sent'";
     case "archived":
-      return "archived=1";
+      return "agent_state IS NULL AND archived=1";
     case "spam":
-      return "spam=1";
+      return "agent_state IS NULL AND spam=1";
     default:
-      return "direction='in' AND archived=0 AND spam=0";
+      return "agent_state IS NULL AND direction='in' AND archived=0 AND spam=0";
   }
 }
 
@@ -137,118 +140,17 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
     }
   }
 
-  // ---- send ----
+  // ---- send (shared path; agent mailboxes are allowlist-enforced in sendMail) ----
   if (path === "/send" && method === "POST") {
-    if (!env.SEND_EMAIL) {
-      return json(
-        { error: "Sending not configured: enable Email Service in the dashboard, then REDEPLOY this worker (the binding attaches at deploy time)." },
-        501
-      );
-    }
-    // JSON for plain sends; multipart/form-data when attachments ride along
-    // (fields + repeated "attachments" file parts, ≤5 MiB total per message).
-    let body: { from: string; to: string; cc?: string; subject: string; text: string; inReplyToId?: string };
-    let files: File[] = [];
-    if (request.headers.get("content-type")?.includes("multipart/form-data")) {
-      const form = await request.formData();
-      body = {
-        from: String(form.get("from") ?? ""),
-        to: String(form.get("to") ?? ""),
-        cc: String(form.get("cc") ?? ""),
-        subject: String(form.get("subject") ?? ""),
-        text: String(form.get("text") ?? ""),
-        inReplyToId: String(form.get("inReplyToId") ?? "") || undefined
-      };
-      // workers-types declares getAll(): string[]; at runtime file parts are File.
-      files = (form.getAll("attachments") as unknown as (File | string)[]).filter(
-        (f): f is File => typeof f !== "string" && f.size > 0
-      );
-      const total = files.reduce((n, f) => n + f.size, 0);
-      if (total > 5 * 1024 * 1024) {
-        return json({ error: "attachments exceed the 5 MiB per-message limit" }, 400);
-      }
-    } else {
-      body = (await request.json()) as typeof body;
-    }
-    const box = await env.DB.prepare("SELECT * FROM addresses WHERE address = ? AND active = 1")
-      .bind(body.from.toLowerCase())
-      .first<{ address: string; display_name: string | null }>();
-    if (!box) return json({ error: `sender ${body.from}@${env.MAIL_DOMAIN} does not exist or is inactive` }, 400);
-
-    const fromAddr = `${box.address}@${env.MAIL_DOMAIN}`;
-    const original = body.inReplyToId
-      ? await env.DB.prepare("SELECT * FROM mails WHERE id = ?").bind(body.inReplyToId).first<MailRow>()
-      : null;
-    const ccList = (body.cc ?? "")
-      .split(",")
-      .map((a) => a.trim().toLowerCase())
-      .filter((a) => a && a !== body.to.toLowerCase() && a !== fromAddr);
-
-    const html = `<div style="font-family:-apple-system,'Segoe UI',sans-serif;line-height:1.7;white-space:pre-wrap;">${escapeHtml(body.text)}</div>`;
-    const id = crypto.randomUUID();
-    const refs = original
-      ? [original.refs, original.message_id].filter(Boolean).join(" ") || null
-      : null;
-
-    // Attachments: read once, send via the binding, and keep a copy in R2 so
-    // the sent mail shows (and serves) them in the UI like received mail does.
-    const attachmentMeta: { key: string; filename: string; mime: string; size: number }[] = [];
-    const outAttachments: NonNullable<Parameters<NonNullable<Env["SEND_EMAIL"]>["send"]>[0]["attachments"]> = [];
-    for (const [i, file] of files.entries()) {
-      const buf = await file.arrayBuffer();
-      const mime = file.type || "application/octet-stream";
-      const filename = file.name || `attachment-${i + 1}`;
-      outAttachments.push({ filename, content: buf, type: mime, disposition: "attachment" });
-      const key = `mail/${id}/${i + 1}-${filename.replace(/[^\w.\-]+/g, "_").slice(0, 80)}`;
-      await env.R2.put(key, buf, { httpMetadata: { contentType: mime } });
-      attachmentMeta.push({ key, filename, mime, size: file.size });
-    }
-
-    let status = "sent";
-    let sendError: string | null = null;
     try {
-      await env.SEND_EMAIL.send({
-        to: body.to,
-        from: fromAddr,
-        ...(ccList.length ? { cc: ccList } : {}),
-        subject: body.subject,
-        html,
-        text: body.text,
-        ...(outAttachments.length ? { attachments: outAttachments } : {})
-      });
+      const input = await parseSendRequest(request);
+      const result = await sendMail(env, input);
+      if (result.status === "failed") return json({ error: `send failed: ${result.error}`, id: result.id }, 502);
+      return json({ ok: true, id: result.id, deduped: result.deduped ?? false });
     } catch (error) {
-      status = "failed";
-      sendError = error instanceof Error ? error.message : String(error);
+      if (error instanceof SendError) return json({ error: error.message, detail: error.detail }, error.status);
+      throw error;
     }
-
-    await env.DB.prepare(
-      `INSERT INTO mails (id, direction, status, in_reply_to, refs, thread_key,
-         from_addr, from_name, to_addr, cc_addr, subject, text_body, html_body, snippet, attachments, read)
-       VALUES (?, 'out', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
-    )
-      .bind(
-        id,
-        status,
-        original?.message_id ?? null,
-        refs,
-        original ? (original.thread_key ?? original.message_id) : null,
-        fromAddr,
-        box.display_name,
-        body.to.toLowerCase(),
-        ccList.length ? ccList.join(",") : null,
-        body.subject,
-        body.text,
-        html,
-        snippetOf(body.text, null),
-        attachmentMeta.length ? JSON.stringify(attachmentMeta) : null
-      )
-      .run();
-
-    if (original && !original.read) {
-      await env.DB.prepare("UPDATE mails SET read = 1 WHERE id = ?").bind(original.id).run();
-    }
-    if (sendError) return json({ error: `send failed: ${sendError}` }, 502);
-    return json({ ok: true, id });
   }
 
   // ---- attachments ----
@@ -276,16 +178,78 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
       display_name?: string;
       forward_to?: string;
       note?: string;
+      kind?: string;
+      agent_webhook_url?: string;
+      agent_purpose?: string;
     };
     const address = body.address.trim().toLowerCase();
     if (!/^[a-z0-9][a-z0-9._-]*$/.test(address)) return json({ error: "invalid local part" }, 400);
+    const kind = body.kind === "agent" ? "agent" : "human";
     await env.DB.prepare(
-      "INSERT INTO addresses (id, address, display_name, forward_to, note) VALUES (?, ?, ?, ?, ?)"
+      `INSERT INTO addresses (id, address, display_name, forward_to, note, kind, agent_webhook_url, agent_purpose)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
-      .bind(crypto.randomUUID(), address, body.display_name ?? null, body.forward_to || null, body.note ?? null)
+      .bind(
+        crypto.randomUUID(),
+        address,
+        body.display_name ?? null,
+        body.forward_to || null,
+        body.note ?? null,
+        kind,
+        body.agent_webhook_url || null,
+        body.agent_purpose || null
+      )
       .run();
     return json({ ok: true }, 201);
   }
+
+  // ---- agent allowlist (mailbox-scoped; default-deny, A2) ----
+  const allowMatch = path.match(/^\/addresses\/([\w-]+)\/allow$/);
+  if (allowMatch) {
+    const mailboxId = allowMatch[1];
+    if (method === "GET") {
+      const rows = await env.DB.prepare(
+        "SELECT id, direction, pattern, note, created_at FROM mail_allow WHERE mailbox_id = ? ORDER BY direction, created_at"
+      )
+        .bind(mailboxId)
+        .all();
+      return json(rows.results);
+    }
+    if (method === "POST") {
+      const body = (await request.json()) as { direction?: string; pattern?: string; note?: string };
+      const direction = body.direction === "out" ? "out" : body.direction === "in" ? "in" : null;
+      const pattern = body.pattern?.trim().toLowerCase();
+      if (!direction || !pattern) return json({ error: "direction (in|out) and pattern are required" }, 400);
+      // pattern is a full address or "@domain"
+      if (!/^@?[a-z0-9][a-z0-9._-]*(@[a-z0-9.-]+)?$/.test(pattern) && !pattern.startsWith("@")) {
+        return json({ error: "pattern must be an address or @domain" }, 400);
+      }
+      await env.DB.prepare(
+        "INSERT INTO mail_allow (id, mailbox_id, direction, pattern, note) VALUES (?, ?, ?, ?, ?)"
+      )
+        .bind(crypto.randomUUID(), mailboxId, direction, pattern, body.note ?? null)
+        .run();
+      return json({ ok: true }, 201);
+    }
+  }
+  const allowDelMatch = path.match(/^\/addresses\/([\w-]+)\/allow\/([\w-]+)$/);
+  if (allowDelMatch && method === "DELETE") {
+    await env.DB.prepare("DELETE FROM mail_allow WHERE id = ? AND mailbox_id = ?")
+      .bind(allowDelMatch[2], allowDelMatch[1])
+      .run();
+    return json({ ok: true });
+  }
+
+  // ---- mint a per-mailbox agent token (shown once; stored hashed) ----
+  const tokenMatch = path.match(/^\/addresses\/([\w-]+)\/agent-token$/);
+  if (tokenMatch && method === "POST") {
+    const token = "cfmail_" + crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "").slice(0, 8);
+    await env.DB.prepare("UPDATE addresses SET agent_token_hash = ? WHERE id = ?")
+      .bind(await sha256Hex(token), tokenMatch[1])
+      .run();
+    return json({ token });
+  }
+
   const addrMatch = path.match(/^\/addresses\/([\w-]+)$/);
   if (addrMatch) {
     const id = addrMatch[1];
@@ -297,7 +261,11 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
         sets.push("active = ?");
         binds.push(body.active ? 1 : 0);
       }
-      for (const f of ["display_name", "forward_to", "note"] as const) {
+      if (body.kind === "human" || body.kind === "agent") {
+        sets.push("kind = ?");
+        binds.push(body.kind);
+      }
+      for (const f of ["display_name", "forward_to", "note", "agent_webhook_url", "agent_purpose"] as const) {
         if (typeof body[f] === "string" || body[f] === null) {
           sets.push(`${f} = ?`);
           binds.push((body[f] as string) || null);
@@ -309,6 +277,7 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
     }
     if (method === "DELETE") {
       await env.DB.prepare("DELETE FROM addresses WHERE id = ?").bind(id).run();
+      await env.DB.prepare("DELETE FROM mail_allow WHERE mailbox_id = ?").bind(id).run();
       return json({ ok: true });
     }
   }

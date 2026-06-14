@@ -64,7 +64,9 @@
           <h2 id="d-subject"></h2>
           <p id="d-meta" class="meta"></p>
           <div id="d-attachments" class="attachments"></div>
-          <iframe id="d-frame" sandbox="" class="hidden"></iframe>
+          <!-- sandboxed: no scripts, no same-origin; allow-popups lets links open
+               in a new tab (with <base target="_blank">) without re-enabling JS. -->
+          <iframe id="d-frame" sandbox="allow-popups allow-popups-to-escape-sandbox" class="hidden"></iframe>
           <pre id="d-text" class="hidden"></pre>
           <div id="d-thread"></div>
         </section>

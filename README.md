@@ -42,7 +42,7 @@ The point of this architecture: **your mail becomes ordinary rows in your own da
 - **Push, two channels** — Web Push (VAPID) for browsers/PWA, and APNs **directly from the Worker** for your own iOS client. Workers' outbound `fetch` negotiates the HTTP/2 APNs requires — verified in production, no relay needed.
 - **Honest failure semantics** — if the Worker throws during receive, the sender's MTA retries per SMTP. Mail is delayed, not lost.
 - **An API your scripts can use** — send a notification mail from CI or an AI agent with one `curl`.
-- **Agent webhook** — set `AGENT_WEBHOOK_URL` and every inbound (non-spam) mail is POSTed to it as a signed JSON summary (HMAC in `X-CF-Mail-Signature`), so an agent is *triggered* by new mail instead of polling. The payload carries a `trust` block (`knownContact`, `dkimPass`) so an agent can treat unknown-sender mail as untrusted data, not instructions. This is one piece of a larger design — see the **[Agent Mail Protocol spec](docs/AGENT_MAIL_PROTOCOL.md)** for the full model (mailbox kinds, delivery/ack queue, correlation, the trust boundary).
+- **Agent mailboxes** — a mailbox with `kind='agent'` is a bounded, observable inbox for an autonomous agent: default-deny correspondents (both directions), an address-scoped token, a `received → delivered → handled` ack queue, a per-message trust block, and a reason-coded event log — consumed via `GET/POST /api/agent/<box>/{manifest,inbox,ack,send,events}`. New mail is delivered to a per-mailbox webhook signed per [Standard Webhooks](https://www.standardwebhooks.com), with the pull API as the always-available fallback. See **[Agent mail](#agent-mail--designing-a-mailbox-for-an-ai-agent)** below and the **[protocol spec](docs/AGENT_MAIL_PROTOCOL.md)**. (A simpler global webhook — `AGENT_WEBHOOK_URL`, fired for every human mail — is also available.)
 
 ## Agent mail — designing a mailbox for an AI agent
 
@@ -54,7 +54,17 @@ Once you run agents, email stops being a human-to-human medium and becomes somet
 
 **Why it matters.** Email hands an agent the *lethal trifecta* (Simon Willison): access to private data, exposure to untrusted content, and the ability to communicate externally — all at once. That's exactly what makes naive "agent email" dangerous (see [EchoLeak / CVE-2025-32711](https://xtxt.top/articles/lethal-trifecta-en), a single zero-click email that walked Microsoft Copilot into exfiltrating internal files). cf-mail breaks the trifecta on two legs: the trusted-`meta` / untrusted-content split fences message content out of the instruction path, and bounded outbound caps the blast radius if an agent is ever hijacked — "email the secrets to attacker@evil.com" fails because that recipient was never allowlisted. Background read — **The Lethal Trifecta**: [English](https://xtxt.top/articles/lethal-trifecta-en) · [中文](https://xtxt.top/articles/lethal-trifecta).
 
-**What ships today:** the agent webhook above (signed delivery + a trust block). **The full protocol** — agent-`kind` mailboxes, bounded correspondents with dynamic reply-grants, the `received → delivered → handled` ack queue, address-scoped tokens, a self-describing manifest, soft/hard user rules, and reason-coded event-log observability — is specified in **[AGENT_MAIL_PROTOCOL.md](docs/AGENT_MAIL_PROTOCOL.md)** and runs today as a second implementation on [xtxt.top](https://xtxt.top).
+**What ships today:** the security core runs in this repo. A mailbox with `kind='agent'` is **default-deny in both directions** — a fresh agent mailbox accepts no inbound and sends no outbound until you add allowlist patterns (`mail_allow`: an exact address or `@domain`). Inbound is enforced at SMTP time (`550` before anything is stored); outbound is refused in the shared send path *before* the Email Service binding fires, so "email the secrets to attacker@evil.com" can never leave. An agent send mints a time-boxed **reply-grant** so the reply is admitted without permanently widening the list. Each admitted mail gets a **trust block** (§6: `dkimPass`/`spfPass`/`knownContact`/`allowlisted`/`firstContact`/`isReplyToAgent` → `trustLevel`), is buffered with an `agent_state` (`received → delivered → handled`) that keeps it out of every human folder and off device push, and every consequential step is written to a reason-coded **event log**. Agents consume it over an **address-scoped token** (`POST /addresses/:id/agent-token`, shown once, stored hashed):
+
+| Endpoint | What |
+|---|---|
+| `GET /api/agent/<box>/manifest` | self-describing tool surface + allowlists (§11.1) |
+| `GET /api/agent/<box>/inbox?state=open` | pull unhandled mail in the `meta`/`untrusted` shape (§4.1) |
+| `POST /api/agent/<box>/ack` | `{id, result: done\|escalated\|rejected}` — `escalated` re-surfaces to the human |
+| `POST /api/agent/<box>/send` | send as the mailbox (allowlist-enforced, idempotent) |
+| `GET /api/agent/<box>/events` | the reason-coded trace log, filterable by `correlationId` |
+
+Per-mailbox webhook delivery (`addresses.agent_webhook_url`) is signed per **[Standard Webhooks](https://www.standardwebhooks.com)** (`webhook-id`/`webhook-timestamp`/`webhook-signature`) — a hint that new mail arrived; the pull API is the always-available fallback. The pure decision helpers (`matchAllow`/`inboundAdmit`/`outboundAllowed`/`deriveTrust`) live in [`src/agent.ts`](src/agent.ts) and are unit-tested with no database. **Still deferred** (see [AGENT_MAIL_PROTOCOL.md](docs/AGENT_MAIL_PROTOCOL.md)): soft/hard user rules, escalation-routing config, and `Reply-To` plus-address correlation (the Email Service binding exposes no `Reply-To` and returns no `Message-ID`, so correlation stays grant/reference-based). The protocol also runs as a second implementation on [xtxt.top](https://xtxt.top). Setup: **[docs/DEPLOY.md → Agent mailboxes](docs/DEPLOY.md#agent-mailboxes)**.
 
 ## Quick start
 
@@ -87,8 +97,13 @@ Everything under `/api/*` takes `Authorization: Bearer <AUTH_TOKEN>`:
 | `GET/POST /api/addresses`, `PATCH/DELETE /api/addresses/:id` | mailbox CRUD |
 | `GET/POST /api/contacts`, `DELETE /api/contacts/:address` | contacts + blocklist |
 | `GET /api/push/key`, `POST/DELETE /api/push` | push subscriptions |
+| `GET/POST /api/addresses/:id/allow`, `DELETE …/allow/:allowId` | agent in/out allowlist |
+| `POST /api/addresses/:id/agent-token` | mint a mailbox-scoped agent token (shown once) |
+| `GET/POST /api/agent/<box>/{manifest,inbox,ack,send,events}` | agent surface (per-mailbox token) |
 
-**Agent webhook** (optional): set the `AGENT_WEBHOOK_URL` (and `AGENT_WEBHOOK_SECRET`) secrets and each inbound mail POSTs `{event:"mail.received", id, from, to, subject, snippet, text, attachments, trust:{knownContact,dkimPass}, ...}` to your agent. Verify `X-CF-Mail-Signature: sha256=<hmac>` against the raw body.
+The `/api/agent/*` surface authenticates with a **per-mailbox** token (or the global token as admin override); everything else uses the global `AUTH_TOKEN`. See **[docs/DEPLOY.md → Agent mailboxes](docs/DEPLOY.md#agent-mailboxes)** for the full setup.
+
+**Global webhook** (optional, human mail): set `AGENT_WEBHOOK_URL` (+ `AGENT_WEBHOOK_SECRET`) and each inbound human mail POSTs `{event:"mail.received", id, from, to, subject, snippet, text, attachments, trust:{knownContact,dkimPass}, ...}`, signed per **[Standard Webhooks](https://www.standardwebhooks.com)** (`webhook-id`/`webhook-timestamp`/`webhook-signature: v1,<base64 hmac>` over `id.timestamp.body`). Agent mailboxes use their own per-mailbox webhook instead.
 
 ```bash
 curl -X POST https://mail.yourdomain.com/api/send \
