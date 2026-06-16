@@ -131,7 +131,56 @@ POST /api/push   {"endpoint": "apns:<device-token-hex>", "label": "iPhone"}
 
 回 `400`/`410` 的失效端点会被自动清理。
 
-## 9. 日常运维
+## 9. Agent 邮箱
+
+agent 邮箱（`kind='agent'`）是给自治 agent 的一个有界、可观测的收件箱——**双向默认拒绝**、不进人类文件夹、用按邮箱绑定的令牌消费。完整模型见 [AGENT_MAIL_PROTOCOL.zh-CN.md](AGENT_MAIL_PROTOCOL.zh-CN.md)。
+
+**已经在跑旧版本？** 按顺序各应用一次迁移（全新安装从 `schema.sql` 直接带上）：
+
+```bash
+npx wrangler d1 execute cf-mail --remote --file=migrations/0001_agent_mailbox.sql
+npx wrangler d1 execute cf-mail --remote --file=migrations/0002_agent_rules.sql
+```
+
+然后建一个 agent 邮箱（这些管理调用用全局 `AUTH_TOKEN` 授权）：
+
+```bash
+BASE=https://mail.yourdomain.com; H="Authorization: Bearer $AUTH_TOKEN"
+
+# 1. 建 agent 邮箱
+curl -X POST $BASE/api/addresses -H "$H" -H 'content-type: application/json' \
+  -d '{"address":"agent","kind":"agent","agent_purpose":"我的助手",
+       "agent_webhook_url":"https://my-agent.example.com/hook"}'   # webhook 可选
+
+# 2. 加白名单——加之前默认全拒（id = addresses.id）
+curl -X POST $BASE/api/addresses/<id>/allow -H "$H" -H 'content-type: application/json' \
+  -d '{"direction":"in","pattern":"@yourcompany.com"}'
+curl -X POST $BASE/api/addresses/<id>/allow -H "$H" -H 'content-type: application/json' \
+  -d '{"direction":"out","pattern":"you@yourcompany.com"}'
+
+# 3. 铸按邮箱绑定的 agent 令牌（只打印一次，哈希存储）
+curl -X POST $BASE/api/addresses/<id>/agent-token -H "$H"     # → {"token":"cfmail_…"}
+```
+
+agent 用**它自己的**令牌（不是全局令牌）：
+
+```bash
+AH="Authorization: Bearer cfmail_…"
+curl $BASE/api/agent/agent/manifest -H "$AH"            # 自描述工具面
+curl "$BASE/api/agent/agent/inbox?state=open" -H "$AH"  # 拉未处理邮件
+curl -X POST $BASE/api/agent/agent/ack  -H "$AH" -d '{"id":"…","result":"done"}'
+curl -X POST $BASE/api/agent/agent/send -H "$AH" -d '{"to":"you@yourcompany.com","subject":"…","text":"…"}'
+curl "$BASE/api/agent/agent/events" -H "$AH"            # 带 reason code 的追踪日志
+```
+
+注意：
+- 发往非白名单收件人会在邮件离开前被拒（`403`）；agent 发信会铸一个 7 天回信凭证让对方回信被放行。
+- `AGENT_WEBHOOK_SECRET`（`wrangler secret`）按 [Standard Webhooks](https://www.standardwebhooks.com) 给每邮箱 webhook 投递签名；不设则不签——生产请设。
+- agent 邮件从不推送到你的设备、也不进收件箱/已发文件夹；通过 `events` 观测（`ack {result:"escalated"}` 会把信回升给你并推送）。
+- **软规则**（`agent_rules`，可选）：owner 声明的*建议性*指引，在 manifest 透出——用 `PATCH /api/addresses/<id>` `{"agent_rules":"第一条\n第二条"}` 或后台 Agent 面板设置。**不强制**（硬边界是白名单），只塑造表现良好的 agent 怎么做。
+- 入站已加固：投递在 SMTP accept 之后跑（`ctx.waitUntil`）、重投按 Message-ID 去重、附件单封上限 10 MiB。
+
+## 10. 日常运维
 
 | 任务 | 做法 |
 |---|---|
@@ -140,8 +189,11 @@ POST /api/push   {"endpoint": "apns:<device-token-hex>", "label": "iPhone"}
 | 备份 | D1 自带 30 天任意时间点恢复（`wrangler d1 time-travel`）；冷备用 `wrangler d1 export cf-mail --remote --output backup.sql` 定期导出 |
 | 更新 cf-mail | `git pull && npm install && npm run deploy`（schema 变更会以新 `.sql` 文件发布——先应用再部署） |
 | 下线 | 先关 catch-all 规则（邮件开始退回），再删 Worker；D1/R2 里的存档在你删除前一直都在 |
+| 给 `/api/*` 限流 | Bearer 令牌是唯一闸门。在 `/api/*` 上加一条 Cloudflare **Rate Limiting** 规则（如单 IP >20 次/10s 拦截），把猜令牌/爬取在边缘挡住 |
 
-## 10. 故障排查
+> 安全响应头（CSP、`X-Content-Type-Options: nosniff`、`Referrer-Policy`、`X-Frame-Options`）由 worker 对每个响应设置；邮件预览 iframe 是 `sandbox` 的（无脚本、无同源）。无需额外配置。
+
+## 11. 故障排查
 
 | 症状 | 原因 | 解法 |
 |---|---|---|
@@ -154,3 +206,6 @@ POST /api/push   {"endpoint": "apns:<device-token-hex>", "label": "iPhone"}
 | iOS Safari 推送无声无息 | Web Push 需要主屏幕 PWA 上下文 | 加到主屏幕后再订阅 |
 | APNs 返回 `403 InvalidProviderToken` | 用了 App Store Connect 的密钥 | 建专用 APNs 密钥 |
 | 部署出问题后来信延迟 | Worker 抛错，发件方 MTA 按 SMTP 在重试 | 修好 Worker，排队的邮件下次重试自然到达 |
+| agent 邮件被退/收件箱一直空 | 发件人不在该 agent 的入站白名单（默认拒绝） | 加一条 `direction:"in"` 白名单；在 `events` 里查 `rejected/not_allowlisted` |
+| agent `send` 返回 403 | 收件人不在出站白名单、也不是被回信对象 | 加一条 `direction:"out"` 白名单 |
+| agent 接口返回 401 | 令牌错，或升级后 `no such column: kind`/`agent_rules` | 用 `agent-token` 给的邮箱令牌；应用 `migrations/0001`、`0002` |

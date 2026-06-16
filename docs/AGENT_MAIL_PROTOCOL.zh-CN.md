@@ -328,25 +328,27 @@ GET /api/agent/<mailbox>/events?since=<cursor>&correlationId=<id>
 
 **入站服务事件：** 某服务把回执/告警发到 agent 地址 → webhook 带 `meta.knownContact`（若该服务已保存）→ agent 把 `untrusted.body` 当数据解析、绝不当命令 → ack `done`。
 
-## 附录 B — cf-mail 实现现状（v0.1）
+## 附录 B — cf-mail 实现现状
 
 | AMP 特性 | cf-mail 现状 |
 |---|---|
 | 持久存储即队列（D1） | ✅ |
-| 入站 webhook + HMAC 签名 | ✅（全局 `AGENT_WEBHOOK_URL`）；⚠️ 自创的仅签 body——待迁移到 Standard Webhooks（§4.2） |
-| `meta`/`untrusted` 分离、`trust.{knownContact,dkimPass}` | ✅ 已在载荷中 |
-| 每邮箱 `kind: human \| agent` | ⛔ 规划中 |
-| 有界通信——入站**与**出站白名单 + 动态回信凭证、默认拒收 | ⛔ 规划中（现状：agent 邮箱像 human 一样收所有入站、能发往任意地址） |
-| 每邮箱 webhook + 按地址绑定令牌 | ⛔ 规划中（现状：一个全局 hook + `mail:send`） |
-| ack + 状态机（`delivered/handled/failed`） | ⛔ 规划中 |
-| 拉取 API（`/inbox?state=open`） | ⛔ 规划中（现状：`GET /api/mails`） |
-| 经 `Reply-To` plus 地址做关联 | ⚠️ 收信时已折叠 plus 地址；发信时铸 corrId 尚未接 |
-| 升级（`agent → 人`） | ⛔ 规划中 |
-| 自描述 manifest（§11.1） | ⛔ 规划中 |
-| 用户 rules——硬（强制）+ 软（声明）（§11.2） | ⚠️ 硬规则以黑名单/scope 形式存在；统一策略 + 软规则规划中 |
-| agent 可观测——事件日志 + reason code（§11.3） | ⚠️ 仅 Workers Logs；结构化的每邮箱事件日志规划中 |
+| `meta`/`untrusted` 分离、每封信持久化完整 `trust` 块（§6） | ✅ |
+| 每邮箱 `kind: human \| agent` | ✅ |
+| 有界通信——入站**与**出站白名单 + 动态回信凭证、默认拒收 | ✅（入站 SMTP `550` 拦截；出站在发送绑定触发前拒绝） |
+| 每邮箱 webhook + 按地址绑定令牌 | ✅（`addresses.agent_webhook_url`；`agent-token` 只显示一次、哈希存储） |
+| webhook 签名 | ✅ Standard Webhooks（`webhook-id`/`webhook-timestamp`/`webhook-signature`），每邮箱 hook 与遗留全局 hook 都签 |
+| ack + 状态机（`received → delivered → handled/failed`） | ✅ |
+| 拉取 API（`/api/agent/<box>/inbox?state=open`） | ✅ |
+| 自描述 manifest（§11.1） | ✅（`/api/agent/<box>/manifest`） |
+| 升级（`agent → 人`） | ✅（`ack {result:"escalated"}` → 回升成人收件箱一行 + 设备推送；结构化路由配置待做） |
+| agent 可观测——事件日志 + reason code（§11.3） | ✅（`mail_event` + `/api/agent/<box>/events`） |
+| 用户 rules——硬（强制）+ 软（声明）（§11.2） | ✅ 硬 = 白名单/scope；软 = owner 声明的建议性规则（`addresses.agent_rules`）在 manifest 透出 |
+| cron 重投 + 死信清扫（§4.4） | ✅ `scheduled()` 每 5 分钟——重投未送达、到上限死信→升级、过期凭证清理、事件日志 GC |
+| 入站加固 | ✅ 投递非阻塞（`ctx.waitUntil`）、Message-ID 去重、单封 10 MiB 附件上限 |
+| 经 `Reply-To` plus 地址做关联（§7） | ⚠️ 收信折叠 plus corrId；回信靠凭证 + References 放行。受阻：发送绑定不暴露 `Reply-To` / `Message-ID` |
 
-这张表就是 build backlog：spec 是目标，cf-mail 一次一个加法地长成它。
+整套 AMP 核心都已在本仓库落地；唯一还挂 ⚠️ 的 `Reply-To` 关联是平台限制、不是设计缺口。纯决策函数在 [`src/agent.ts`](../src/agent.ts)，有单测（[`test/agent.test.ts`](../test/agent.test.ts)）。
 
 **第二个实现。** [xtblog](https://xtxt.top)（作者的站点，同样跑在 Cloudflare 上，但用 Drizzle/D1）已于 2026-06 落地几乎整套协议。v0.1 核心：`kind:agent` 邮箱、双向有界通信 + 动态回信凭证（默认拒收，入站在 SMTP 边界、出站在发送 API 强制）、每邮箱按地址绑定的令牌、每封信持久化的完整信任块、`received→delivered→handled/failed` ack 状态机、拉取 API，以及带 reason code 的只追加事件日志。随后 v0.2 补上了工具层与加固：自描述 manifest（§11.1）、硬+软用户 rules（§11.2）、升级路由进人邮箱（§9）、`trustLevel`（§13.2）、每邮箱拒收方式（§13.4）、cron 驱动的重投 + 死信清扫（§4.4）、Standard Webhooks 签名（§4.2）。**唯一做不了的**是 §7 的 `Reply-To` plus 地址：Cloudflare Email Service 发送绑定既不暴露 `Reply-To`、也不回传 `Message-ID`，所以关联只能停在 References/grant 方案，直到能发 raw MIME。两个独立实现收敛到同一套网线契约——这正是把它写成协议的意义。
 

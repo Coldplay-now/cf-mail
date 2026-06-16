@@ -328,7 +328,7 @@ Every payload carries `schemaVersion`. Evolution is **additive only** within a m
 
 **Inbound service event:** a service emails a receipt/alert to the agent address → webhook with `meta.knownContact` (if the service is saved) → agent parses `untrusted.body` as data, never as a command → acks `done`.
 
-## Appendix B — implementation status in cf-mail (v0.1)
+## Appendix B — implementation status in cf-mail
 
 | AMP feature | cf-mail today |
 |---|---|
@@ -344,10 +344,11 @@ Every payload carries `schemaVersion`. Evolution is **additive only** within a m
 | Escalation (`agent → human`) | ✅ (`ack {result:"escalated"}` → device push; structured routing config deferred) |
 | Agent observability — event log + reason codes (§11.3) | ✅ (`mail_event` + `/api/agent/<box>/events`) |
 | User rules — hard (enforced) + soft (declared) (§11.2) | ✅ hard = the allowlist/scopes; soft = owner-declared advisory rules (`addresses.agent_rules`) surfaced in the manifest |
+| Cron redelivery + dead-letter sweep (§4.4) | ✅ `scheduled()` every 5 min — redeliver undelivered, dead-letter → escalate at the cap, expire grants, GC the event log |
+| Inbound hardening | ✅ non-blocking delivery (`ctx.waitUntil`), Message-ID dedup, 10 MiB/message attachment cap |
 | Correlation via `Reply-To` plus-addressing (§7) | ⚠️ plus-addr corrId folds on receive; reply-grants + reference matching admit replies. Blocked: the send binding exposes no `Reply-To` / `Message-ID` |
-| Cron redelivery + dead-letter sweep (§4.4) | ⛔ deferred (the pull API is the fallback) |
 
-The security core (§2.1 / §3 / §6 / §10) ships in this repo; the remaining ⚠️/⛔ rows are additive and don't change the wire contract. The pure decision functions live in [`src/agent.ts`](../src/agent.ts) and are unit-tested ([`test/agent.test.ts`](../test/agent.test.ts)).
+The whole AMP core ships in this repo; the one remaining ⚠️ row (`Reply-To` correlation) is platform-blocked, not a design gap. The pure decision functions live in [`src/agent.ts`](../src/agent.ts) and are unit-tested ([`test/agent.test.ts`](../test/agent.test.ts)).
 
 **Second implementation.** [xtblog](https://xtxt.top) (the author's site, same Cloudflare substrate but on Drizzle/D1) implements nearly the whole protocol as of 2026-06. The v0.1 core: `kind:agent` mailboxes, bounded correspondents in both directions with dynamic reply-grants (default-deny, enforced at the SMTP boundary inbound and the send API outbound), per-mailbox address-scoped tokens, the full trust block persisted per message, the `received→delivered→handled/failed` ack state machine, a pull API, and an append-only event log with reason codes. Then v0.2 added the tool layer and hardening: the self-describing manifest (§11.1), hard+soft user rules (§11.2), human-mailbox escalation routing (§9), `trustLevel` (§13.2), per-mailbox reject mode (§13.4), a cron-driven redelivery + dead-letter sweep (§4.4), and Standard Webhooks signing (§4.2). The **one part it cannot do** is §7 `Reply-To` plus-addressing: Cloudflare's Email Service send binding exposes no `Reply-To` and returns no `Message-ID`, so correlation stays reference/grant-based until raw-MIME sending is viable. Two independent implementations converging on the same wire contract is the point of writing it as a protocol.
 

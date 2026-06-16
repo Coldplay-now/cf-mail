@@ -135,10 +135,11 @@ Endpoints answering `400`/`410` are pruned automatically.
 
 An agent mailbox (`kind='agent'`) is a bounded, observable inbox for an autonomous agent — **default-deny in both directions**, kept out of the human folders, consumed over a mailbox-scoped token. Full model: [AGENT_MAIL_PROTOCOL.md](AGENT_MAIL_PROTOCOL.md).
 
-**Already running an older deploy?** Apply the migration once (fresh installs get this from `schema.sql`):
+**Already running an older deploy?** Apply each migration once, in order (fresh installs get all of this from `schema.sql`):
 
 ```bash
 npx wrangler d1 execute cf-mail --remote --file=migrations/0001_agent_mailbox.sql
+npx wrangler d1 execute cf-mail --remote --file=migrations/0002_agent_rules.sql
 ```
 
 Then set up an agent mailbox (the global `AUTH_TOKEN` authorizes these admin calls):
@@ -176,6 +177,8 @@ Notes:
 - A send to a non-allowlisted recipient is refused (`403`) *before* mail leaves; an agent send mints a 7-day reply-grant so the reply is admitted.
 - `AGENT_WEBHOOK_SECRET` (a `wrangler secret`) signs per-mailbox webhook deliveries per [Standard Webhooks](https://www.standardwebhooks.com). Without it, deliveries are unsigned — set it in production.
 - Agent mail never pushes to your devices and never appears in the inbox/sent folders; observe it via `events` (and `ack {result:"escalated"}` re-surfaces a message to you with a push).
+- **Soft rules** (`agent_rules`, optional): owner-declared, *advisory* guidance shown in the manifest — set via `PATCH /api/addresses/<id>` `{"agent_rules":"line 1\nline 2"}` or the web UI's Agent panel. NOT enforced (the allowlist is the hard boundary); they just shape how a well-behaved agent acts.
+- Inbound is hardened: delivery runs after the SMTP accept (`ctx.waitUntil`), retried deliveries dedup on Message-ID, and attachments are capped at 10 MiB/message.
 
 ## 10. Operations
 
@@ -205,4 +208,4 @@ Notes:
 | Inbound mail delayed after a bad deploy | Worker threw; sender MTAs are retrying per SMTP | Fix the worker; queued mail arrives on the next retry |
 | Agent mail bounces / inbox stays empty | Sender not on the agent's inbound allowlist (default-deny) | Add a `direction:"in"` allow pattern; check `events` for `rejected/not_allowlisted` |
 | Agent `send` → 403 | Recipient not on the outbound allowlist and not a reply target | Add a `direction:"out"` allow pattern |
-| Agent endpoints → 401 | Wrong token, or `no such column: kind` after upgrade | Use the mailbox token from `agent-token`; apply `migrations/0001_agent_mailbox.sql` |
+| Agent endpoints → 401 | Wrong token, or `no such column: kind`/`agent_rules` after upgrade | Use the mailbox token from `agent-token`; apply `migrations/0001` + `0002` |
