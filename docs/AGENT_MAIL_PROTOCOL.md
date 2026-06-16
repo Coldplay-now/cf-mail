@@ -343,7 +343,7 @@ Every payload carries `schemaVersion`. Evolution is **additive only** within a m
 | Self-describing manifest (§11.1) | ✅ (`/api/agent/<box>/manifest`) |
 | Escalation (`agent → human`) | ✅ (`ack {result:"escalated"}` → device push; structured routing config deferred) |
 | Agent observability — event log + reason codes (§11.3) | ✅ (`mail_event` + `/api/agent/<box>/events`) |
-| User rules — hard (enforced) + soft (declared) (§11.2) | ⚠️ hard rules = the allowlist/scopes; declared soft rules deferred |
+| User rules — hard (enforced) + soft (declared) (§11.2) | ✅ hard = the allowlist/scopes; soft = owner-declared advisory rules (`addresses.agent_rules`) surfaced in the manifest |
 | Correlation via `Reply-To` plus-addressing (§7) | ⚠️ plus-addr corrId folds on receive; reply-grants + reference matching admit replies. Blocked: the send binding exposes no `Reply-To` / `Message-ID` |
 | Cron redelivery + dead-letter sweep (§4.4) | ⛔ deferred (the pull API is the fallback) |
 

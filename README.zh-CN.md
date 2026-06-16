@@ -64,7 +64,7 @@
 | `POST /api/agent/<box>/send` | 以本邮箱发信（白名单强制、幂等） |
 | `GET /api/agent/<box>/events` | 带 reason code 的追踪日志，可按 `correlationId` 过滤 |
 
-每邮箱 webhook 投递（`addresses.agent_webhook_url`）按 **[Standard Webhooks](https://www.standardwebhooks.com)** 签名（`webhook-id`/`webhook-timestamp`/`webhook-signature`）——它只是"有新信了"的提示，拉取 API 才是始终可用的兜底。纯决策函数（`matchAllow`/`inboundAdmit`/`outboundAllowed`/`deriveTrust`）放在 [`src/agent.ts`](src/agent.ts)，无数据库即可单测。**仍延后**（见 [AGENT_MAIL_PROTOCOL.zh-CN.md](docs/AGENT_MAIL_PROTOCOL.zh-CN.md)）：软/硬用户 rules、升级路由配置、以及 §7 的 `Reply-To` 加号寻址关联（Email Service 发信绑定不暴露 `Reply-To`、也不返回 `Message-ID`，关联只能基于凭证/引用）。该协议也作为第二个实现跑在 [xtxt.top](https://xtxt.top) 上。配置步骤：**[docs/DEPLOY.md → Agent mailboxes](docs/DEPLOY.md#agent-mailboxes)**。
+每邮箱 webhook 投递（`addresses.agent_webhook_url`）按 **[Standard Webhooks](https://www.standardwebhooks.com)** 签名（`webhook-id`/`webhook-timestamp`/`webhook-signature`）——它只是"有新信了"的提示，拉取 API 才是始终可用的兜底。owner 声明的**软规则**（`addresses.agent_rules`，一行一条）会在 manifest 里作为**建议**透出——不强制，唯一的硬边界是白名单（§11.2）。纯决策函数（`matchAllow`/`inboundAdmit`/`outboundAllowed`/`deriveTrust`）放在 [`src/agent.ts`](src/agent.ts)，无数据库即可单测。**仍延后**（见 [AGENT_MAIL_PROTOCOL.zh-CN.md](docs/AGENT_MAIL_PROTOCOL.zh-CN.md)）：结构化的升级路由配置、以及 §7 的 `Reply-To` 加号寻址关联（Email Service 发信绑定不暴露 `Reply-To`、也不返回 `Message-ID`，关联只能基于凭证/引用）。该协议也作为第二个实现跑在 [xtxt.top](https://xtxt.top) 上。配置步骤：**[docs/DEPLOY.md → Agent mailboxes](docs/DEPLOY.md#agent-mailboxes)**。
 
 ## 快速开始
 

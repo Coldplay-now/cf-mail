@@ -348,6 +348,7 @@ async function openAgentPanel(addr) {
   $("#ag-addr").textContent = `${addr.address}@${state.domain}`;
   $("#ag-purpose").value = addr.agent_purpose || "";
   $("#ag-webhook").value = addr.agent_webhook_url || "";
+  $("#ag-rules").value = addr.agent_rules || "";
   $("#ag-token-out").textContent = "";
   $("#ag-error").textContent = "";
   await Promise.all([loadAllow(), loadAgentEvents(), loadAgentInbox()]);
@@ -361,11 +362,13 @@ $("#ag-save").onclick = async () => {
       method: "PATCH",
       body: JSON.stringify({
         agent_purpose: $("#ag-purpose").value.trim() || null,
-        agent_webhook_url: $("#ag-webhook").value.trim() || null
+        agent_webhook_url: $("#ag-webhook").value.trim() || null,
+        agent_rules: $("#ag-rules").value.trim() || null
       })
     });
     state.agent.agent_purpose = $("#ag-purpose").value.trim();
     state.agent.agent_webhook_url = $("#ag-webhook").value.trim();
+    state.agent.agent_rules = $("#ag-rules").value.trim();
     $("#ag-error").textContent = "Saved.";
   } catch (e) {
     $("#ag-error").textContent = e.message;

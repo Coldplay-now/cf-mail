@@ -136,6 +136,9 @@
         <h3>Purpose & delivery</h3>
         <label>Purpose <input id="ag-purpose" placeholder="what this agent is for"></label>
         <label>Webhook URL <input id="ag-webhook" placeholder="https://… (optional; pull API is the fallback)"></label>
+        <label>Soft rules <span class="meta">— one per line; advisory guidance shown in the manifest, NOT enforced (the allowlist is the hard boundary)</span>
+          <textarea id="ag-rules" rows="3" placeholder="e.g. Don't auto-reply outside work hours&#10;Escalate anything about payments"></textarea>
+        </label>
         <div class="row right"><button id="ag-save" class="primary">Save</button></div>
 
         <h3>Allowlist <span class="meta">— default-deny; exact address or <code>@domain</code></span></h3>

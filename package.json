@@ -1,6 +1,6 @@
 {
   "name": "cf-mail",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A self-hosted mailbox that runs entirely on Cloudflare: Email Routing + Workers + D1 + R2, with a built-in web client and optional push notifications.",
   "license": "MIT",
   "private": true,

@@ -7,7 +7,7 @@
 import { type Env, authorized, json } from "./env";
 import { sha256Hex } from "./webhook";
 import { buildManifest, canAck, isAckResult } from "./agent";
-import { type AddressRow, getAddress, listAllow, logEvent, payloadFromRow } from "./agent-db";
+import { type AddressRow, getAddress, listAllow, logEvent, parseRules, payloadFromRow } from "./agent-db";
 import { type MailRecord } from "./agent-db";
 import { SendError, parseSendRequest, sendMail } from "./send";
 import { escalateToHuman } from "./escalate";
@@ -71,7 +71,8 @@ export async function handleAgentApi(request: Request, env: Env): Promise<Respon
         address: `${box.address}@${env.MAIL_DOMAIN}`,
         purpose: box.agent_purpose,
         inAllow,
-        outAllow
+        outAllow,
+        rules: parseRules(box.agent_rules)
       })
     );
   }

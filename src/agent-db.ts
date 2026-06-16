@@ -15,7 +15,16 @@ export interface AddressRow {
   kind: string;
   agent_webhook_url: string | null;
   agent_purpose: string | null;
+  agent_rules: string | null;
   agent_token_hash: string | null;
+}
+
+/** Split stored soft rules (one per line) into a trimmed, non-empty list. */
+export function parseRules(raw: string | null | undefined): string[] {
+  return (raw ?? "")
+    .split("\n")
+    .map((r) => r.trim())
+    .filter(Boolean);
 }
 
 /** Resolve a mailbox by local part (base, plus-addressing already folded). */

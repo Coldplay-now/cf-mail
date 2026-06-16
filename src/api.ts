@@ -181,13 +181,14 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
       kind?: string;
       agent_webhook_url?: string;
       agent_purpose?: string;
+      agent_rules?: string;
     };
     const address = body.address.trim().toLowerCase();
     if (!/^[a-z0-9][a-z0-9._-]*$/.test(address)) return json({ error: "invalid local part" }, 400);
     const kind = body.kind === "agent" ? "agent" : "human";
     await env.DB.prepare(
-      `INSERT INTO addresses (id, address, display_name, forward_to, note, kind, agent_webhook_url, agent_purpose)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO addresses (id, address, display_name, forward_to, note, kind, agent_webhook_url, agent_purpose, agent_rules)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
       .bind(
         crypto.randomUUID(),
@@ -197,7 +198,8 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
         body.note ?? null,
         kind,
         body.agent_webhook_url || null,
-        body.agent_purpose || null
+        body.agent_purpose || null,
+        body.agent_rules || null
       )
       .run();
     return json({ ok: true }, 201);
@@ -265,7 +267,7 @@ export async function handleApi(request: Request, env: Env): Promise<Response> {
         sets.push("kind = ?");
         binds.push(body.kind);
       }
-      for (const f of ["display_name", "forward_to", "note", "agent_webhook_url", "agent_purpose"] as const) {
+      for (const f of ["display_name", "forward_to", "note", "agent_webhook_url", "agent_purpose", "agent_rules"] as const) {
         if (typeof body[f] === "string" || body[f] === null) {
           sets.push(`${f} = ?`);
           binds.push((body[f] as string) || null);

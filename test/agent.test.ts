@@ -11,6 +11,7 @@ import {
   outboundAllowed
 } from "../src/agent";
 import { snippetOf, threadKeyOf } from "../src/env";
+import { parseRules } from "../src/agent-db";
 
 describe("matchAllow", () => {
   it("matches exact addresses case-insensitively", () => {
@@ -115,6 +116,19 @@ describe("buildManifest (§11.1)", () => {
     expect(m.operations.map((o) => o.name).sort()).toEqual(["ack", "events", "inbox", "send"]);
     expect(m.inboundAllowed).toEqual(["@x.com"]);
     expect(m.operations.find((o) => o.name === "inbox")?.path).toBe("/api/agent/agent/inbox");
+  });
+  it("surfaces soft rules (§11.2), defaulting to an empty list", () => {
+    expect(buildManifest({ address: "a@x.com", purpose: null, inAllow: [], outAllow: [] }).rules).toEqual([]);
+    const m = buildManifest({ address: "a@x.com", purpose: null, inAllow: [], outAllow: [], rules: ["no auto-reply at night"] });
+    expect(m.rules).toEqual(["no auto-reply at night"]);
+  });
+});
+
+describe("parseRules (§11.2)", () => {
+  it("splits one rule per line, trims, drops blanks", () => {
+    expect(parseRules("  escalate payments \n\n  no night replies  ")).toEqual(["escalate payments", "no night replies"]);
+    expect(parseRules(null)).toEqual([]);
+    expect(parseRules("")).toEqual([]);
   });
 });
 

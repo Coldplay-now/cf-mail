@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS addresses (
   agent_webhook_url TEXT,
   -- short self-description surfaced in the manifest (§11.1)
   agent_purpose TEXT,
+  -- soft, owner-declared rules (one per line), surfaced in the manifest (§11.2)
+  -- as ADVISORY guidance for the agent — NOT enforced. The hard guarantee is the
+  -- allowlist (mail_allow); these only shape how a well-behaved agent acts.
+  agent_rules TEXT,
   -- SHA-256 (hex) of the per-mailbox agent bearer token; shown once at creation
   agent_token_hash TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))

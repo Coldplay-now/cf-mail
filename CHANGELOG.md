@@ -3,6 +3,28 @@
 All notable changes to cf-mail are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com); versions track `package.json`.
 
+## [0.3.0] — Inbound hardening + soft rules
+
+### Added
+- **Soft user rules** (AMP §11.2): owner-declared, advisory guidance per agent
+  mailbox (`addresses.agent_rules`, one per line) surfaced in the manifest. NOT
+  enforced — the allowlist remains the only hard boundary; these just shape how a
+  well-behaved agent acts. Editable from the web UI's Agent panel.
+
+### Changed
+- **Inbound delivery is non-blocking**: push + webhooks now run via
+  `ctx.waitUntil` after the message is stored, so a slow webhook/push no longer
+  holds up the SMTP accept (or risks the Email Worker time budget). The store
+  stays synchronous — mail is never lost.
+- **Inbound dedup on (Message-ID, recipient)**: Email Routing retries the whole
+  delivery if the worker throws; a Message-ID already on file for the recipient
+  is acked without double-storing.
+- **Inbound attachment cap** (10 MiB/message): an attachment-bomb can't run R2
+  away; the body and earlier parts are still stored.
+
+### Migration
+Apply `migrations/0002_agent_rules.sql` before deploying.
+
 ## [0.2.0] — Agent Mail Protocol core
 
 The headline: cf-mail now **implements** the [Agent Mail Protocol](docs/AGENT_MAIL_PROTOCOL.md)
