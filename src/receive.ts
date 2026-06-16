@@ -41,9 +41,22 @@ interface InboundEmailMessage {
   forward(rcptTo: string): Promise<void>;
 }
 
+// Minimal ExecutionContext shape — lets us run best-effort delivery (push,
+// webhooks) AFTER the message is safely stored without holding up the SMTP
+// accept. The store itself stays awaited so mail is never lost.
+interface ExecCtx {
+  waitUntil(p: Promise<unknown>): void;
+}
+const noopExec: ExecCtx = { waitUntil() {} };
+
+// Cap total inbound attachment bytes kept in R2, so a single huge / many-part
+// message (or attachment-bomb spam) can't run the bucket away. Parts past the
+// cap are skipped (logged); the message body is still stored.
+const INBOUND_MAX_ATTACH_BYTES = 10 * 1024 * 1024;
+
 const safeName = (name: string) => name.replace(/[^\w.\-]+/g, "_").slice(0, 80) || "attachment";
 
-export async function receiveEmail(message: InboundEmailMessage, env: Env): Promise<void> {
+export async function receiveEmail(message: InboundEmailMessage, env: Env, exec: ExecCtx = noopExec): Promise<void> {
   const toAddr = message.to.toLowerCase();
   const localPart = toAddr.split("@")[0] ?? "";
   const baseLocal = localPart.split("+")[0];
@@ -62,9 +75,19 @@ export async function receiveEmail(message: InboundEmailMessage, env: Env): Prom
   const authResults =
     parsed.headers?.find((h) => h.key.toLowerCase() === "authentication-results")?.value ?? "";
 
+  // Dedup: Email Routing retries the whole delivery if the worker throws, which
+  // could double-store. A Message-ID already on file for this recipient means
+  // we've handled it — ack without inserting again.
+  if (parsed.messageId) {
+    const dup = await env.DB.prepare("SELECT 1 FROM mails WHERE message_id = ? AND to_addr = ? LIMIT 1")
+      .bind(parsed.messageId, toAddr)
+      .first();
+    if (dup) return;
+  }
+
   // ---------- AGENT mailbox: default-deny admission, buffer, deliver ----------
   if (box.kind === "agent") {
-    await receiveAgentMail(message, env, { box, parsed, id, fromAddr, toAddr, baseLocal, localPart, authResults });
+    await receiveAgentMail(message, env, exec, { box, parsed, id, fromAddr, toAddr, baseLocal, localPart, authResults });
     return;
   }
 
@@ -113,25 +136,31 @@ export async function receiveEmail(message: InboundEmailMessage, env: Env): Prom
   }
 
   if (!blocked) {
-    await notifyDevices(env, {
-      id,
-      fromName: parsed.from?.name || null,
-      fromAddr,
-      subject: parsed.subject ?? null,
-      snippet: snippetOf(parsed.text, parsed.html)
-    });
-    await notifyGlobalWebhook(env, {
-      id,
-      messageId: parsed.messageId ?? null,
-      inReplyTo: parsed.inReplyTo ?? null,
-      references: parsed.references ?? null,
-      from: { address: fromAddr, name: parsed.from?.name || null },
-      to: toAddr,
-      cc: ccAddr,
-      subject: parsed.subject ?? null,
-      snippet: snippetOf(parsed.text, parsed.html),
-      authResults
-    });
+    // Best-effort and post-store: run after the SMTP accept so a slow webhook
+    // or push service never delays (or risks timing out) inbound handling.
+    exec.waitUntil(
+      (async () => {
+        await notifyDevices(env, {
+          id,
+          fromName: parsed.from?.name || null,
+          fromAddr,
+          subject: parsed.subject ?? null,
+          snippet: snippetOf(parsed.text, parsed.html)
+        });
+        await notifyGlobalWebhook(env, {
+          id,
+          messageId: parsed.messageId ?? null,
+          inReplyTo: parsed.inReplyTo ?? null,
+          references: parsed.references ?? null,
+          from: { address: fromAddr, name: parsed.from?.name || null },
+          to: toAddr,
+          cc: ccAddr,
+          subject: parsed.subject ?? null,
+          snippet: snippetOf(parsed.text, parsed.html),
+          authResults
+        });
+      })()
+    );
   }
 }
 
@@ -148,8 +177,8 @@ interface AgentCtx {
   authResults: string;
 }
 
-async function receiveAgentMail(message: InboundEmailMessage, env: Env, ctx: AgentCtx): Promise<void> {
-  const { box, parsed, id, fromAddr, toAddr, baseLocal, localPart, authResults } = ctx;
+async function receiveAgentMail(message: InboundEmailMessage, env: Env, exec: ExecCtx, agentCtx: AgentCtx): Promise<void> {
+  const { box, parsed, id, fromAddr, toAddr, baseLocal, localPart, authResults } = agentCtx;
   const now = Date.now();
 
   const inAllow = await listAllow(env, box.id, "in");
@@ -238,22 +267,29 @@ async function receiveAgentMail(message: InboundEmailMessage, env: Env, ctx: Age
       attachments: attachments.length ? JSON.stringify(attachments) : null,
       created_at: new Date(now).toISOString()
     };
-    const delivered = await postSignedWebhook(
-      box.agent_webhook_url,
-      id,
-      { event: "mail.received", ...payloadFromRow(row) },
-      env.AGENT_WEBHOOK_SECRET,
-      Math.floor(now / 1000)
+    // Best-effort and post-store: deliver after the SMTP accept. The pull API
+    // and the cron redelivery sweep both cover a failed/slow push.
+    const webhookUrl = box.agent_webhook_url;
+    exec.waitUntil(
+      (async () => {
+        const delivered = await postSignedWebhook(
+          webhookUrl,
+          id,
+          { event: "mail.received", ...payloadFromRow(row) },
+          env.AGENT_WEBHOOK_SECRET,
+          Math.floor(now / 1000)
+        );
+        await env.DB.prepare("UPDATE mails SET agent_state = ?, delivery_attempts = delivery_attempts + 1 WHERE id = ?")
+          .bind(delivered ? "delivered" : "received", id)
+          .run();
+        await logEvent(env, {
+          mailboxId: box.id,
+          mailId: id,
+          type: delivered ? "delivered" : "delivery_failed",
+          correlationId
+        });
+      })()
     );
-    await env.DB.prepare("UPDATE mails SET agent_state = ?, delivery_attempts = delivery_attempts + 1 WHERE id = ?")
-      .bind(delivered ? "delivered" : "received", id)
-      .run();
-    await logEvent(env, {
-      mailboxId: box.id,
-      mailId: id,
-      type: delivered ? "delivered" : "delivery_failed",
-      correlationId
-    });
   }
   // No device push, no forward: agent mail is not human mail.
 }
@@ -274,12 +310,19 @@ async function storeAttachments(
   id: string
 ): Promise<{ key: string; filename: string; mime: string; size: number }[]> {
   const attachments: { key: string; filename: string; mime: string; size: number }[] = [];
+  let total = 0;
   for (const [i, att] of (parsed.attachments ?? []).entries()) {
+    const body = att.content; // ArrayBuffer | string
+    const size = typeof body === "string" ? body.length : body.byteLength;
+    // Stop once the per-message cap is reached — body + earlier parts are kept.
+    if (total + size > INBOUND_MAX_ATTACH_BYTES) {
+      console.warn(`attachment cap hit on ${id}: skipping "${att.filename}" (${size}B), total ${total}B`);
+      continue;
+    }
+    total += size;
     const filename = safeName(att.filename || `attachment-${i + 1}`);
     const key = `mail/${id}/${i + 1}-${filename}`;
-    const body = att.content; // ArrayBuffer | string
     await env.R2.put(key, body, { httpMetadata: { contentType: att.mimeType || "application/octet-stream" } });
-    const size = typeof body === "string" ? body.length : body.byteLength;
     attachments.push({ key, filename, mime: att.mimeType || "application/octet-stream", size });
   }
   return attachments;

@@ -21,9 +21,15 @@ function harden(res: Response): Response {
 }
 
 export default {
-  // Inbound mail (Email Routing catch-all → this worker).
-  async email(message: Parameters<typeof receiveEmail>[0], env: Env): Promise<void> {
-    await receiveEmail(message, env);
+  // Inbound mail (Email Routing catch-all → this worker). The message is stored
+  // synchronously; best-effort delivery (push, webhooks) runs via ctx.waitUntil
+  // so it doesn't hold up the SMTP accept.
+  async email(
+    message: Parameters<typeof receiveEmail>[0],
+    env: Env,
+    ctx: { waitUntil(p: Promise<unknown>): void }
+  ): Promise<void> {
+    await receiveEmail(message, env, ctx);
   },
 
   // Cron (wrangler.jsonc triggers.crons): agent redelivery / dead-letter / GC.
